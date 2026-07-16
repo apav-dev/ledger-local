@@ -1,3 +1,6 @@
+import { existsSync, mkdtempSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   countTransactions,
@@ -82,6 +85,11 @@ describe('db', () => {
     const second = upsertTransactions(db, [txn('t1', { status: 'posted', amount: -55.0 })]);
     expect(second).toEqual({ inserted: 0, updated: 1 });
     expect(countTransactions(db, 'acc_1')).toBe(2);
+    const row = db
+      .prepare('SELECT status, amount FROM transactions WHERE id = ?')
+      .get('t1') as { status: string; amount: number };
+    expect(row.status).toBe('posted');
+    expect(row.amount).toBe(-55);
   });
 
   it('knownTransactionIds returns only existing ids', () => {
@@ -90,5 +98,19 @@ describe('db', () => {
     const known = knownTransactionIds(db, ['t1', 't2']);
     expect(known.has('t1')).toBe(true);
     expect(known.has('t2')).toBe(false);
+  });
+
+  it('chmods the db file and WAL sidecar to 0600 on a real file path', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'teller-db-test-'));
+    const dbPath = join(dir, 'test.db');
+    const db = openDb(dbPath);
+    upsertEnrollment(db, enrollment);
+    upsertAccount(db, account);
+
+    expect(statSync(dbPath).mode & 0o777).toBe(0o600);
+    const walPath = `${dbPath}-wal`;
+    if (existsSync(walPath)) {
+      expect(statSync(walPath).mode & 0o777).toBe(0o600);
+    }
   });
 });

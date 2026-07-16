@@ -85,6 +85,12 @@ export function openDb(dbPath: string): Db {
   db.pragma('foreign_keys = ON');
   db.exec(SCHEMA);
   if (fresh) fs.chmodSync(dbPath, 0o600);
+  if (dbPath !== ':memory:') {
+    const walPath = `${dbPath}-wal`;
+    const shmPath = `${dbPath}-shm`;
+    if (fs.existsSync(walPath)) fs.chmodSync(walPath, 0o600);
+    if (fs.existsSync(shmPath)) fs.chmodSync(shmPath, 0o600);
+  }
   return db;
 }
 

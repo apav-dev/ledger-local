@@ -1,3 +1,4 @@
+import os from 'node:os';
 import { describe, expect, it } from 'vitest';
 import { connectPageHtml, startAuthServer } from '../src/auth/server.js';
 
@@ -17,7 +18,7 @@ describe('connectPageHtml', () => {
 
 describe('startAuthServer', () => {
   it('serves the connect page and resolves on valid callback', async () => {
-    const server = startAuthServer({ applicationId: 'app_42', environment: 'development', port: 0 });
+    const server = await startAuthServer({ applicationId: 'app_42', environment: 'development', port: 0 });
     const page = await fetch(server.url);
     expect(await page.text()).toContain('app_42');
     const res = await fetch(`${server.url}callback`, {
@@ -34,7 +35,7 @@ describe('startAuthServer', () => {
   });
 
   it('rejects malformed callbacks with 400 and keeps waiting', async () => {
-    const server = startAuthServer({ applicationId: 'app_42', environment: 'development', port: 0 });
+    const server = await startAuthServer({ applicationId: 'app_42', environment: 'development', port: 0 });
     const res = await fetch(`${server.url}callback`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -46,12 +47,46 @@ describe('startAuthServer', () => {
   });
 
   it('times out when no callback arrives', async () => {
-    const server = startAuthServer({
+    const server = await startAuthServer({
       applicationId: 'app_42',
       environment: 'development',
       port: 0,
       timeoutMs: 50,
     });
     await expect(server.result).rejects.toThrow(/timed out/i);
+  });
+
+  it('rejects on server error (e.g. EADDRINUSE) instead of crashing the process', async () => {
+    const serverA = await startAuthServer({ applicationId: 'app_42', environment: 'development', port: 0 });
+    const port = Number(new URL(serverA.url).port);
+
+    await expect(
+      startAuthServer({ applicationId: 'app_42', environment: 'development', port }),
+    ).rejects.toThrow(/EADDRINUSE/);
+
+    serverA.close();
+    await expect(serverA.result).rejects.toThrow(/closed|timed out/i);
+  });
+
+  it('binds to loopback only, not all interfaces', async () => {
+    const server = await startAuthServer({ applicationId: 'app_42', environment: 'development', port: 0 });
+    const port = Number(new URL(server.url).port);
+
+    const res = await fetch(`http://127.0.0.1:${port}/`);
+    expect(res.status).toBe(200);
+
+    const nonLoopback = Object.values(os.networkInterfaces())
+      .filter((ifaces): ifaces is os.NetworkInterfaceInfo[] => Boolean(ifaces))
+      .flat()
+      .find((iface) => iface.family === 'IPv4' && !iface.internal);
+
+    if (nonLoopback) {
+      await expect(
+        fetch(`http://${nonLoopback.address}:${port}/`, { signal: AbortSignal.timeout(500) }),
+      ).rejects.toThrow();
+    }
+
+    server.close();
+    await expect(server.result).rejects.toThrow(/closed|timed out/i);
   });
 });

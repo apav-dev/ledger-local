@@ -1,3 +1,4 @@
+import { once } from 'node:events';
 import http from 'node:http';
 import { z } from 'zod';
 
@@ -52,12 +53,12 @@ export function connectPageHtml(applicationId: string, environment: string): str
 const DEFAULT_PORT = 8021;
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 
-export function startAuthServer(opts: {
+export async function startAuthServer(opts: {
   applicationId: string;
   environment: string;
   port?: number;
   timeoutMs?: number;
-}): { url: string; result: Promise<AuthResult>; close: () => void } {
+}): Promise<{ url: string; result: Promise<AuthResult>; close: () => void }> {
   let resolveResult: (r: AuthResult) => void;
   let rejectResult: (e: Error) => void;
   const result = new Promise<AuthResult>((resolve, reject) => {
@@ -65,11 +66,12 @@ export function startAuthServer(opts: {
     rejectResult = reject;
   });
   let settled = false;
+  let timer: NodeJS.Timeout | undefined;
   const settle = (fn: () => void) => {
     if (settled) return;
     settled = true;
     fn();
-    clearTimeout(timer);
+    if (timer !== undefined) clearTimeout(timer);
     server.close();
   };
 
@@ -82,6 +84,21 @@ export function startAuthServer(opts: {
     if (req.method === 'POST' && req.url === '/callback') {
       const chunks: Buffer[] = [];
       req.on('data', (c: Buffer) => chunks.push(c));
+      req.on('error', () => {
+        // Client aborted mid-upload (or a similar socket error). The request
+        // never completed, so we must not resolve/reject the enrollment
+        // result — just fail this one request without crashing the server.
+        try {
+          if (!res.headersSent) {
+            res.writeHead(400, { 'content-type': 'application/json' });
+          }
+          if (!res.writableEnded) {
+            res.end(JSON.stringify({ error: 'invalid enrollment payload' }));
+          }
+        } catch {
+          // Socket is already gone; nothing left to respond to.
+        }
+      });
       req.on('end', () => {
         let parsed: unknown;
         try {
@@ -111,14 +128,40 @@ export function startAuthServer(opts: {
     res.end();
   });
 
-  const timer = setTimeout(() => {
+  // Attach the error listener before listen() so a pre-listening failure
+  // (e.g. EADDRINUSE) rejects `result` via settle() instead of crashing the
+  // process with an uncaught 'error' event.
+  server.on('error', (err: unknown) => {
+    settle(() => rejectResult(err instanceof Error ? err : new Error(String(err))));
+  });
+
+  server.listen(opts.port ?? DEFAULT_PORT, '127.0.0.1');
+
+  try {
+    // once() special-cases 'error': if the server emits 'error' before
+    // 'listening' (e.g. EADDRINUSE), this await rejects with that same
+    // error instead of hanging forever waiting for a 'listening' that will
+    // never come.
+    await once(server, 'listening');
+  } catch (err) {
+    // The server.on('error', ...) listener above has already settled
+    // `result` with this same failure, but since startAuthServer throws
+    // here, the caller never receives the object holding `result` and so
+    // never gets a chance to attach a handler to it. Mark it handled here
+    // to avoid a Node "unhandled rejection" for a promise nobody could ever
+    // have reached, then propagate the failure out of startAuthServer
+    // itself so callers see the bind failure immediately.
+    result.catch(() => {});
+    throw err instanceof Error ? err : new Error(String(err));
+  }
+
+  const address = server.address();
+  const port = typeof address === 'object' && address !== null ? address.port : (opts.port ?? DEFAULT_PORT);
+
+  timer = setTimeout(() => {
     settle(() => rejectResult(new Error('Enrollment timed out — no callback received')));
   }, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   timer.unref();
-
-  server.listen(opts.port ?? DEFAULT_PORT);
-  const address = server.address();
-  const port = typeof address === 'object' && address !== null ? address.port : (opts.port ?? DEFAULT_PORT);
 
   return {
     url: `http://localhost:${port}/`,

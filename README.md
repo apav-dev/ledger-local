@@ -1,4 +1,4 @@
-# teller-local
+# ledger-local
 
 Local-first personal finance data. Syncs accounts and transactions from the
 [Teller API](https://teller.io/docs) (development environment: real banks, free,

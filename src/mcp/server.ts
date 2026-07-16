@@ -37,7 +37,7 @@ function err(error: unknown): ToolResult {
 }
 
 export function buildMcpServer(deps: Deps): McpServer {
-  const server = new McpServer({ name: 'teller-local', version: '0.1.0' });
+  const server = new McpServer({ name: 'ledger-local', version: '0.1.0' });
 
   server.registerTool(
     'list_accounts',

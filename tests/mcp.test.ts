@@ -2,6 +2,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { describe, expect, it } from 'vitest';
 import type { TellerConfig } from '../src/core/config.js';
+import { TellerApiError } from '../src/core/teller-client.js';
 import type { TellerApi } from '../src/core/types.js';
 import { buildMcpServer } from '../src/mcp/server.js';
 import { seedDb } from './helpers.js';
@@ -73,5 +74,23 @@ describe('mcp server', () => {
     });
     const data = textOf(result) as { grandTotal: number };
     expect(data.grandTotal).toBe(140);
+  });
+
+  it('sync surfaces a 401 as an error result mentioning teller auth', async () => {
+    const reauthApi: TellerApi = {
+      listAccounts: async () => {
+        throw new TellerApiError('unauthorized', 401);
+      },
+      getBalance: async () => ({ account_id: 'x', available: null, ledger: null }),
+      listTransactions: async () => [],
+    };
+    const server = buildMcpServer({ db: seedDb(), api: reauthApi, cfg });
+    const client = new Client({ name: 'test', version: '0.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const result = await client.callTool({ name: 'sync', arguments: {} });
+    expect(result.isError).toBe(true);
+    const content = result.content as Array<{ type: string; text: string }>;
+    expect(content[0]?.text).toContain('teller auth');
   });
 });

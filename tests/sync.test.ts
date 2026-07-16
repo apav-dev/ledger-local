@@ -7,6 +7,7 @@ import {
   upsertTransactions,
 } from '../src/core/db.js';
 import { syncAll, toTransactionRow } from '../src/core/sync.js';
+import { TellerApiError } from '../src/core/teller-client.js';
 import type {
   TellerAccount,
   TellerApi,
@@ -136,6 +137,24 @@ describe('syncAll', () => {
     const results = await syncAll(db, api, { accountId: 'acc_2' });
     expect(results).toHaveLength(1);
     expect(results[0]?.accountId).toBe('acc_2');
+  });
+
+  it('flags needsReauth on a 401 and leaves it unset for other failures', async () => {
+    const db = dbWithEnrollment();
+    const api = fakeApi({
+      listAccounts: async () => [account('acc_1'), account('acc_2')],
+      getBalance: async (_tok, id) => {
+        if (id === 'acc_1') throw new TellerApiError('unauthorized', 401);
+        if (id === 'acc_2') throw new Error('boom');
+        return balance;
+      },
+    });
+    const results = await syncAll(db, api);
+    const reauth = results.find(r => r.accountId === 'acc_1');
+    expect(reauth).toMatchObject({ ok: false, needsReauth: true });
+    const other = results.find(r => r.accountId === 'acc_2');
+    expect(other).toMatchObject({ ok: false });
+    expect(other?.needsReauth).toBeUndefined();
   });
 
   it('aborts a runaway pagination loop instead of hanging', async () => {

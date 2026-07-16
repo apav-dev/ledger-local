@@ -1,7 +1,7 @@
-import { existsSync, mkdtempSync, statSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   countTransactions,
   knownTransactionIds,
@@ -60,6 +60,15 @@ function freshDb() {
   return db;
 }
 
+let tmpDbDir: string | undefined;
+
+afterEach(() => {
+  if (tmpDbDir !== undefined) {
+    rmSync(tmpDbDir, { recursive: true, force: true });
+    tmpDbDir = undefined;
+  }
+});
+
 describe('db', () => {
   it('round-trips enrollments and updates on conflict', () => {
     const db = freshDb();
@@ -102,6 +111,7 @@ describe('db', () => {
 
   it('chmods the db file and WAL sidecar to 0600 on a real file path', () => {
     const dir = mkdtempSync(join(tmpdir(), 'teller-db-test-'));
+    tmpDbDir = dir;
     const dbPath = join(dir, 'test.db');
     const db = openDb(dbPath);
     upsertEnrollment(db, enrollment);

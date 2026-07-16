@@ -119,6 +119,21 @@ export function buildMcpServer(deps: Deps): McpServer {
     async (args) => {
       try {
         const results = await syncAll(deps.db, deps.api, { accountId: args.accountId });
+        if (results.some(r => r.needsReauth)) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  error:
+                    'Teller rejected the stored access token (401). Ask the user to re-link the bank by running `teller auth` in a terminal.',
+                  results,
+                }),
+              },
+            ],
+            isError: true,
+          };
+        }
         return ok({ results });
       } catch (error) {
         return err(error);

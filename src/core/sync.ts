@@ -9,6 +9,7 @@ import {
   type Db,
   type TransactionRow,
 } from './db.js';
+import { TellerApiError } from './teller-client.js';
 import type {
   TellerAccount,
   TellerApi,
@@ -28,6 +29,7 @@ export interface AccountSyncResult {
   inserted: number;
   updated: number;
   error?: string;
+  needsReauth?: boolean | undefined;
 }
 
 function parseMoney(value: string | null): number | null {
@@ -123,6 +125,7 @@ async function syncAccount(
       inserted: 0,
       updated: 0,
       error: error instanceof Error ? error.message : String(error),
+      ...(error instanceof TellerApiError && error.status === 401 ? { needsReauth: true } : {}),
     };
   }
 }
@@ -152,6 +155,7 @@ export async function syncAll(
         inserted: 0,
         updated: 0,
         error: error instanceof Error ? error.message : String(error),
+        ...(error instanceof TellerApiError && error.status === 401 ? { needsReauth: true } : {}),
       });
       continue;
     }

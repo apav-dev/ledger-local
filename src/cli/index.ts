@@ -34,7 +34,8 @@ function withCtx(program: Command, run: (ctx: Ctx, ...args: never[]) => Promise<
 
 function handleError(error: unknown, json: boolean): never {
   if (error instanceof ConfigError) {
-    process.stderr.write(`${error.message}\n`);
+    const msg = error.message;
+    process.stderr.write(json ? JSON.stringify({ error: msg }) + '\n' : msg + '\n');
     process.exit(EXIT_CONFIG);
   }
   if (error instanceof TellerApiError && error.status === 401) {
@@ -42,27 +43,38 @@ function handleError(error: unknown, json: boolean): never {
     process.stderr.write(json ? JSON.stringify({ error: msg, needs_reauth: true }) + '\n' : msg + '\n');
     process.exit(EXIT_REAUTH);
   }
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  const msg = error instanceof Error ? error.message : String(error);
+  process.stderr.write(json ? JSON.stringify({ error: msg }) + '\n' : msg + '\n');
   process.exit(EXIT_GENERAL);
 }
 
 function printSyncResults(results: AccountSyncResult[], json: boolean): void {
+  const needsReauth = results.some(r => r.needsReauth);
   if (json) {
-    process.stdout.write(JSON.stringify(results, null, 2) + '\n');
-    return;
+    process.stdout.write(
+      JSON.stringify(needsReauth ? { results, needs_reauth: true } : results, null, 2) + '\n',
+    );
+  } else {
+    process.stdout.write(
+      formatTable(
+        results.map(r => ({
+          account: r.accountName,
+          ok: r.ok ? 'yes' : 'NO',
+          inserted: r.inserted,
+          updated: r.updated,
+          error: r.error ?? '',
+        })),
+      ) + '\n',
+    );
   }
-  process.stdout.write(
-    formatTable(
-      results.map(r => ({
-        account: r.accountName,
-        ok: r.ok ? 'yes' : 'NO',
-        inserted: r.inserted,
-        updated: r.updated,
-        error: r.error ?? '',
-      })),
-    ) + '\n',
-  );
-  if (results.some(r => !r.ok)) process.exitCode = EXIT_GENERAL;
+  if (needsReauth) {
+    process.stderr.write(
+      'Teller rejected an access token (401). Re-run `teller auth` for that institution.\n',
+    );
+    process.exitCode = EXIT_REAUTH;
+  } else if (results.some(r => !r.ok)) {
+    process.exitCode = EXIT_GENERAL;
+  }
 }
 
 const program = new Command()

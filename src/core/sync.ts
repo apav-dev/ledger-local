@@ -17,6 +17,9 @@ import type {
 } from './types.js';
 
 const PAGE_SIZE = 1000;
+// 10k pages = 10M transactions at PAGE_SIZE=1000; anything past that indicates a
+// misbehaving API (non-advancing cursor, repeated page) rather than real data.
+const MAX_PAGES = 10_000;
 
 export interface AccountSyncResult {
   accountId: string;
@@ -70,6 +73,7 @@ async function syncAccount(
   accessToken: string,
   tellerAccount: TellerAccount,
   now: () => number,
+  maxPages: number,
 ): Promise<AccountSyncResult> {
   const base = { accountId: tellerAccount.id, accountName: tellerAccount.name };
   try {
@@ -81,7 +85,12 @@ async function syncAccount(
     let updated = 0;
     let fromId: string | undefined;
 
-    for (;;) {
+    for (let pageNum = 0; ; pageNum++) {
+      if (pageNum >= maxPages) {
+        throw new Error(
+          `pagination exceeded ${maxPages} pages for account ${tellerAccount.id} — aborting sync for this account`,
+        );
+      }
       const opts: { count: number; fromId?: string } = { count: PAGE_SIZE };
       if (fromId !== undefined) opts.fromId = fromId;
       const page = await api.listTransactions(accessToken, tellerAccount.id, opts);
@@ -122,9 +131,14 @@ export async function syncAll(
   db: Db,
   api: TellerApi,
   // `| undefined` members: callers pass through optional values under exactOptionalPropertyTypes
-  opts: { accountId?: string | undefined; now?: (() => number) | undefined } = {},
+  opts: {
+    accountId?: string | undefined;
+    now?: (() => number) | undefined;
+    maxPages?: number | undefined;
+  } = {},
 ): Promise<AccountSyncResult[]> {
   const now = opts.now ?? Date.now;
+  const maxPages = opts.maxPages ?? MAX_PAGES;
   const results: AccountSyncResult[] = [];
   for (const enrollment of listEnrollments(db)) {
     let accounts: TellerAccount[];
@@ -143,7 +157,7 @@ export async function syncAll(
     }
     for (const acct of accounts) {
       if (opts.accountId !== undefined && acct.id !== opts.accountId) continue;
-      results.push(await syncAccount(db, api, enrollment.access_token, acct, now));
+      results.push(await syncAccount(db, api, enrollment.access_token, acct, now, maxPages));
     }
   }
   return results;

@@ -137,4 +137,17 @@ describe('syncAll', () => {
     expect(results).toHaveLength(1);
     expect(results[0]?.accountId).toBe('acc_2');
   });
+
+  it('aborts a runaway pagination loop instead of hanging', async () => {
+    const db = dbWithEnrollment();
+    // Misbehaving API: ignores fromId and always returns the same non-empty page.
+    // Initial sync (empty db) never hits the empty-page or fully-known exits, so
+    // without a hard cap this would loop forever.
+    const api = fakeApi({
+      listTransactions: async () => [wireTxn('loop1'), wireTxn('loop2')],
+    });
+    const results = await syncAll(db, api, { maxPages: 5 });
+    expect(results[0]).toMatchObject({ ok: false });
+    expect(results[0]?.error).toContain('pagination exceeded');
+  });
 });

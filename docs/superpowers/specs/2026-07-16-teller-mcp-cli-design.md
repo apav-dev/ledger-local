@@ -159,6 +159,8 @@ Per account, wrapped in one SQLite transaction:
 
 Accounts sync independently; one institution failing does not block others. Results report per-account success/failure. Because the local DB never deletes, history accumulates beyond the bank's sliding window over time.
 
+**Implementation deviation (approved):** per-account work is NOT wrapped in one SQLite transaction as originally written above — `better-sqlite3` transactions are synchronous-only, and they cannot wrap the async pagination loop (each page requires an `await` on the Teller API). Instead, each page's `upsertTransactions` call commits independently as pagination proceeds. The DB remains consistent because upserts are idempotent (keyed by Teller transaction id), and `last_synced_at` is still only set after the full account sync succeeds — a failure partway through a multi-page sync leaves already-committed pages in place and simply retries them (as already-known ids) on the next run, rather than rolling back.
+
 ## Error handling
 
 Small typed error set mapped at both wrappers:

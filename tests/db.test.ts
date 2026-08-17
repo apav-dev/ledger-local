@@ -3,59 +3,69 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  applySyncPage,
   countTransactions,
+  deleteTransactions,
+  getItem,
+  itemIdForAccount,
   knownTransactionIds,
+  listAccountIdsForItem,
   listAccountRows,
-  listEnrollments,
+  listItems,
   openDb,
   setAccountSynced,
+  setItemCursor,
   upsertAccount,
-  upsertEnrollment,
+  upsertItem,
   upsertTransactions,
   type AccountUpsert,
+  type ItemUpsert,
   type TransactionRow,
 } from '../src/core/db.js';
 
-const enrollment = {
-  id: 'enr_1',
-  access_token: 'token_abc',
+const item: ItemUpsert = {
+  id: 'item_1',
+  access_token: 'access-sandbox-abc',
   institution: 'Chase',
+  institution_id: 'ins_56',
   created_at: 1_700_000_000_000,
 };
 
 const account: AccountUpsert = {
   id: 'acc_1',
-  enrollment_id: 'enr_1',
+  item_id: 'item_1',
   name: 'Total Checking',
+  official_name: 'Chase Total Checking',
   institution: 'Chase',
   type: 'depository',
   subtype: 'checking',
-  last_four: '4821',
-  currency: 'USD',
-  status: 'open',
+  mask: '4821',
+  iso_currency_code: 'USD',
   available_balance: 1200.5,
-  ledger_balance: 1250.0,
+  current_balance: 1250.0,
 };
 
+/** Plaid-native sign: positive amount means money left the account. */
 function txn(id: string, over: Partial<TransactionRow> = {}): TransactionRow {
   return {
     id,
     account_id: 'acc_1',
     date: '2026-07-01',
     description: 'COSTCO WHSE',
-    amount: -52.13,
-    category: 'groceries',
+    amount: 52.13,
+    category_primary: 'GENERAL_MERCHANDISE',
+    category_detailed: 'GENERAL_MERCHANDISE_SUPERSTORES',
     counterparty: 'Costco',
     status: 'posted',
-    type: 'card_payment',
-    running_balance: null,
+    type: 'in store',
+    pending_transaction_id: null,
     ...over,
   };
 }
 
 function freshDb() {
   const db = openDb(':memory:');
-  upsertEnrollment(db, enrollment);
+  upsertItem(db, item);
   upsertAccount(db, account);
   return db;
 }
@@ -69,16 +79,46 @@ afterEach(() => {
   }
 });
 
-describe('db', () => {
-  it('round-trips enrollments and updates on conflict', () => {
+describe('items', () => {
+  it('round-trips items and updates on conflict', () => {
     const db = freshDb();
-    upsertEnrollment(db, { ...enrollment, access_token: 'token_new' });
-    const rows = listEnrollments(db);
+    upsertItem(db, { ...item, access_token: 'access-sandbox-new' });
+    const rows = listItems(db);
     expect(rows).toHaveLength(1);
-    expect(rows[0]?.access_token).toBe('token_new');
+    expect(rows[0]?.access_token).toBe('access-sandbox-new');
+    expect(rows[0]?.institution_id).toBe('ins_56');
   });
 
-  it('upsertAccount preserves last_synced_at across re-upsert', () => {
+  it('starts a new item with a NULL cursor so the first sync is a full backfill', () => {
+    const db = freshDb();
+    expect(getItem(db, 'item_1')?.cursor).toBeNull();
+  });
+
+  it('preserves the cursor across re-upsert', () => {
+    // Update-mode re-link must not reset sync progress, or the next sync
+    // re-downloads all history.
+    const db = freshDb();
+    setItemCursor(db, 'item_1', 'cursor_abc');
+    upsertItem(db, { ...item, access_token: 'access-sandbox-rotated' });
+    expect(getItem(db, 'item_1')?.cursor).toBe('cursor_abc');
+  });
+
+  it('resolves an account to its owning item', () => {
+    const db = freshDb();
+    expect(itemIdForAccount(db, 'acc_1')).toBe('item_1');
+    expect(itemIdForAccount(db, 'acc_missing')).toBeUndefined();
+  });
+
+  it('lists account ids for an item', () => {
+    const db = freshDb();
+    upsertAccount(db, { ...account, id: 'acc_2', name: 'Savings' });
+    expect(listAccountIdsForItem(db, 'item_1').sort()).toEqual(['acc_1', 'acc_2']);
+    expect(listAccountIdsForItem(db, 'item_absent')).toEqual([]);
+  });
+});
+
+describe('accounts', () => {
+  it('preserves last_synced_at across re-upsert', () => {
     const db = freshDb();
     setAccountSynced(db, 'acc_1', 123456);
     upsertAccount(db, { ...account, available_balance: 900 });
@@ -87,18 +127,28 @@ describe('db', () => {
     expect(rows[0]?.last_synced_at).toBe(123456);
   });
 
-  it('upsertTransactions reports inserted vs updated and updates in place', () => {
+  it('accepts null mask and null currency, which Plaid does return', () => {
+    const db = freshDb();
+    upsertAccount(db, { ...account, id: 'acc_3', mask: null, iso_currency_code: null });
+    const row = listAccountRows(db).find(a => a.id === 'acc_3');
+    expect(row?.mask).toBeNull();
+    expect(row?.iso_currency_code).toBeNull();
+  });
+});
+
+describe('transactions', () => {
+  it('reports inserted vs updated and updates in place', () => {
     const db = freshDb();
     const first = upsertTransactions(db, [txn('t1', { status: 'pending' }), txn('t2')]);
     expect(first).toEqual({ inserted: 2, updated: 0 });
-    const second = upsertTransactions(db, [txn('t1', { status: 'posted', amount: -55.0 })]);
+    const second = upsertTransactions(db, [txn('t1', { status: 'posted', amount: 55.0 })]);
     expect(second).toEqual({ inserted: 0, updated: 1 });
     expect(countTransactions(db, 'acc_1')).toBe(2);
     const row = db
       .prepare('SELECT status, amount FROM transactions WHERE id = ?')
       .get('t1') as { status: string; amount: number };
     expect(row.status).toBe('posted');
-    expect(row.amount).toBe(-55);
+    expect(row.amount).toBe(55);
   });
 
   it('knownTransactionIds returns only existing ids', () => {
@@ -109,12 +159,117 @@ describe('db', () => {
     expect(known.has('t2')).toBe(false);
   });
 
-  it('chmods the db file and WAL sidecar to 0600 on a real file path', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'teller-db-test-'));
+  it('handles an empty id list without issuing a query', () => {
+    const db = freshDb();
+    expect(knownTransactionIds(db, []).size).toBe(0);
+    expect(deleteTransactions(db, [])).toBe(0);
+    expect(upsertTransactions(db, [])).toEqual({ inserted: 0, updated: 0 });
+  });
+
+  it('chunks past the SQLite bound-parameter cap', () => {
+    // 2000 ids exceeds a single statement's practical parameter budget; a
+    // non-chunked IN(...) would throw here.
+    const db = freshDb();
+    const rows = Array.from({ length: 2000 }, (_, i) => txn(`bulk_${i}`));
+    expect(upsertTransactions(db, rows).inserted).toBe(2000);
+    const ids = rows.map(r => r.id);
+    expect(knownTransactionIds(db, ids).size).toBe(2000);
+    expect(deleteTransactions(db, ids)).toBe(2000);
+  });
+
+  it('deleteTransactions ignores ids it never stored', () => {
+    const db = freshDb();
+    upsertTransactions(db, [txn('t1')]);
+    expect(deleteTransactions(db, ['t1', 'never_stored'])).toBe(1);
+    expect(countTransactions(db, 'acc_1')).toBe(0);
+  });
+
+  it('rejects a transaction for an unknown account instead of dropping it', () => {
+    const db = freshDb();
+    expect(() => upsertTransactions(db, [txn('t1', { account_id: 'acc_ghost' })])).toThrow(
+      /FOREIGN KEY/i,
+    );
+  });
+});
+
+describe('applySyncPage', () => {
+  it('applies added, modified, and removed then advances the cursor', () => {
+    const db = freshDb();
+    upsertTransactions(db, [txn('old_pending', { status: 'pending' })]);
+
+    const result = applySyncPage(
+      db,
+      'item_1',
+      {
+        added: [txn('posted_new', { pending_transaction_id: 'old_pending' })],
+        modified: [txn('old_pending', { status: 'pending', amount: 60 })],
+        removedIds: ['old_pending'],
+      },
+      'cursor_1',
+    );
+
+    // The modified row is written and then removed within the same page; the
+    // removal is what Plaid intends to win.
+    expect(result.removed).toBe(1);
+    expect(getItem(db, 'item_1')?.cursor).toBe('cursor_1');
+    expect(countTransactions(db, 'acc_1')).toBe(1);
+    const ids = db.prepare('SELECT id FROM transactions').all() as Array<{ id: string }>;
+    expect(ids.map(r => r.id)).toEqual(['posted_new']);
+  });
+
+  it('resolves the pending-to-posted handoff without double counting', () => {
+    // The single most important correctness case: Plaid gives the posted
+    // transaction a NEW id and returns the pending id under `removed`.
+    const db = freshDb();
+    applySyncPage(
+      db,
+      'item_1',
+      { added: [txn('pend_1', { status: 'pending', amount: 23.0 })], modified: [], removedIds: [] },
+      'cursor_1',
+    );
+    expect(countTransactions(db, 'acc_1')).toBe(1);
+
+    applySyncPage(
+      db,
+      'item_1',
+      {
+        added: [txn('post_1', { amount: 23.5, pending_transaction_id: 'pend_1' })],
+        modified: [],
+        removedIds: ['pend_1'],
+      },
+      'cursor_2',
+    );
+
+    expect(countTransactions(db, 'acc_1')).toBe(1);
+    const total = db.prepare('SELECT SUM(amount) AS s FROM transactions').get() as { s: number };
+    expect(total.s).toBe(23.5);
+  });
+
+  it('leaves the cursor untouched when the page fails to apply', () => {
+    // Cursor and rows must commit together. A cursor saved without its rows
+    // loses those transactions permanently, since Plaid never resends them.
+    const db = freshDb();
+    setItemCursor(db, 'item_1', 'cursor_safe');
+    expect(() =>
+      applySyncPage(
+        db,
+        'item_1',
+        { added: [txn('orphan', { account_id: 'acc_ghost' })], modified: [], removedIds: [] },
+        'cursor_advanced',
+      ),
+    ).toThrow(/FOREIGN KEY/i);
+    expect(getItem(db, 'item_1')?.cursor).toBe('cursor_safe');
+    expect(countTransactions(db, 'acc_1')).toBe(0);
+  });
+});
+
+describe('openDb', () => {
+  it('chmods the db file and WAL sidecar to 0600', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ledger-db-test-'));
     tmpDbDir = dir;
     const dbPath = join(dir, 'test.db');
     const db = openDb(dbPath);
-    upsertEnrollment(db, enrollment);
+    upsertItem(db, item);
     upsertAccount(db, account);
 
     expect(statSync(dbPath).mode & 0o777).toBe(0o600);
@@ -122,5 +277,10 @@ describe('db', () => {
     if (existsSync(walPath)) {
       expect(statSync(walPath).mode & 0o777).toBe(0o600);
     }
+  });
+
+  it('enforces foreign keys', () => {
+    const db = openDb(':memory:');
+    expect(() => upsertAccount(db, account)).toThrow(/FOREIGN KEY/i);
   });
 });

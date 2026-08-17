@@ -2,19 +2,25 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
-import type { TellerEnvironment } from './types.js';
+
+/**
+ * Plaid retired the Development environment; Sandbox and Production are all
+ * that remain. Production on the Trial plan serves real bank data capped at
+ * 10 Items.
+ */
+export type PlaidEnvironment = 'sandbox' | 'production';
 
 const ConfigFileSchema = z.object({
-  applicationId: z.string().min(1),
-  environment: z.enum(['sandbox', 'development', 'production']).default('development'),
+  clientId: z.string().min(1),
+  secret: z.string().min(1),
+  environment: z.enum(['sandbox', 'production']).default('sandbox'),
 });
 
-export interface TellerConfig {
-  applicationId: string;
-  environment: TellerEnvironment;
+export interface LedgerConfig {
+  clientId: string;
+  secret: string;
+  environment: PlaidEnvironment;
   configDir: string;
-  certPath: string;
-  keyPath: string;
   dbPath: string;
 }
 
@@ -24,20 +30,41 @@ export class ConfigError extends Error {
 
 export function setupInstructions(configDir: string): string {
   return [
-    `Teller is not configured. To set up:`,
-    `  1. Create a Teller application at https://teller.io (dashboard).`,
-    `  2. Download your client certificate pair from the dashboard.`,
+    `Plaid is not configured. To set up:`,
+    `  1. Create a Plaid account at https://dashboard.plaid.com/signup.`,
+    `     US/CA signups get a Trial plan: real production data, up to 10 Items.`,
+    `  2. Copy your client_id and Sandbox (or Production) secret from`,
+    `     Dashboard > Developers > Keys.`,
     `  3. Create ${path.join(configDir, 'config.json')} containing:`,
-    `       { "applicationId": "app_...", "environment": "development" }`,
-    `  4. Save the certificate as ${path.join(configDir, 'certificate.pem')}`,
-    `     and the key as ${path.join(configDir, 'private_key.pem')} (chmod 600 both).`,
-    `  5. Run: teller auth`,
+    `       { "clientId": "...", "secret": "...", "environment": "sandbox" }`,
+    `  4. chmod 600 that file — it holds a live API secret.`,
+    `  5. Run: ledger auth`,
   ].join('\n');
 }
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): TellerConfig {
-  const configDir = env['TELLER_CONFIG_DIR'] ?? path.join(os.homedir(), '.config', 'teller');
-  const dataDir = env['TELLER_DATA_DIR'] ?? path.join(os.homedir(), '.local', 'share', 'teller');
+/**
+ * The secret lives in this file, so a readable-by-others config is a real
+ * credential leak. Warn rather than throw: refusing to run would strand a user
+ * whose umask created the file loosely, and the fix is a one-line chmod.
+ */
+function warnIfConfigWorldReadable(configPath: string): void {
+  let mode: number;
+  try {
+    mode = fs.statSync(configPath).mode & 0o777;
+  } catch {
+    return; // Already read successfully; a stat failure here is not worth failing on.
+  }
+  if ((mode & 0o077) !== 0) {
+    process.stderr.write(
+      `warning: ${configPath} is mode ${mode.toString(8)} and holds a Plaid secret. ` +
+        `Run: chmod 600 ${configPath}\n`,
+    );
+  }
+}
+
+export function loadConfig(env: NodeJS.ProcessEnv = process.env): LedgerConfig {
+  const configDir = env['LEDGER_CONFIG_DIR'] ?? path.join(os.homedir(), '.config', 'ledger');
+  const dataDir = env['LEDGER_DATA_DIR'] ?? path.join(os.homedir(), '.local', 'share', 'ledger');
   const configPath = path.join(configDir, 'config.json');
 
   if (!fs.existsSync(configPath)) {
@@ -53,21 +80,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): TellerConfig {
 
   const parsed = ConfigFileSchema.safeParse(raw);
   if (!parsed.success) {
+    // error.message embeds the failing field paths but never the values, so a
+    // malformed secret cannot leak into stderr here.
     throw new ConfigError(`Invalid ${configPath}: ${parsed.error.message}`);
   }
 
+  warnIfConfigWorldReadable(configPath);
   fs.mkdirSync(dataDir, { recursive: true });
 
   return {
-    applicationId: parsed.data.applicationId,
+    clientId: parsed.data.clientId,
+    secret: parsed.data.secret,
     environment: parsed.data.environment,
     configDir,
-    certPath: path.join(configDir, 'certificate.pem'),
-    keyPath: path.join(configDir, 'private_key.pem'),
-    dbPath: path.join(dataDir, 'teller.db'),
+    dbPath: path.join(dataDir, 'ledger.db'),
   };
-}
-
-export function certsPresent(cfg: TellerConfig): boolean {
-  return fs.existsSync(cfg.certPath) && fs.existsSync(cfg.keyPath);
 }

@@ -83,7 +83,8 @@ export interface SpendingFilters {
 
 export interface SpendingGroup {
   key: string;
-  total: number;
+  /** Integer cents, always positive. Converted to dollars in views.ts. */
+  totalCents: number;
   count: number;
   share: number;
 }
@@ -99,35 +100,36 @@ export function spendingSummary(
   db: Db,
   f: SpendingFilters,
   now: () => number = Date.now,
-): { groups: SpendingGroup[]; grandTotal: number; meta: QueryMeta } {
+): { groups: SpendingGroup[]; grandTotalCents: number; meta: QueryMeta } {
   const clauses = ['date >= @from', 'date <= @to'];
   const params: Record<string, unknown> = { from: f.from, to: f.to };
   if (f.accountId !== undefined) { clauses.push('account_id = @accountId'); params['accountId'] = f.accountId; }
   if (f.includePending !== true) clauses.push("status = 'posted'");
   // Spend = POSITIVE amounts under Plaid's sign convention, which is the inverse
   // of a bank statement. Sole definition of "spend" in the codebase.
-  if (f.includeInflows !== true) clauses.push('amount > 0');
+  if (f.includeInflows !== true) clauses.push('amount_cents > 0');
 
   const rows = db
     .prepare(
-      // Totals are reported as positive dollars regardless of direction, so a
-      // caller comparing groups never has to reason about the sign.
+      // Totals are reported as positive magnitudes regardless of direction, so a
+      // caller comparing groups never has to reason about the sign. Summing
+      // INTEGER cents is exact — no rounding error can accumulate here.
       `SELECT ${GROUP_EXPR[f.groupBy]} AS key,
-              SUM(CASE WHEN amount > 0 THEN amount ELSE -amount END) AS total,
+              SUM(ABS(amount_cents)) AS totalCents,
               COUNT(*) AS count
        FROM transactions
        WHERE ${clauses.join(' AND ')}
        GROUP BY key
-       ORDER BY total DESC`,
+       ORDER BY totalCents DESC`,
     )
-    .all(params) as Array<{ key: string; total: number; count: number }>;
+    .all(params) as Array<{ key: string; totalCents: number; count: number }>;
 
-  const grandTotal = rows.reduce((sum, r) => sum + r.total, 0);
+  const grandTotalCents = rows.reduce((sum, r) => sum + r.totalCents, 0);
   const groups = rows.map(r => ({
     ...r,
-    share: grandTotal === 0 ? 0 : r.total / grandTotal,
+    share: grandTotalCents === 0 ? 0 : r.totalCents / grandTotalCents,
   }));
-  return { groups, grandTotal, meta: metaFor(db, now, f.accountId) };
+  return { groups, grandTotalCents, meta: metaFor(db, now, f.accountId) };
 }
 
 export interface AuthStatusItem {

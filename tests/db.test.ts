@@ -1,6 +1,7 @@
 import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   applySyncPage,
@@ -41,18 +42,21 @@ const account: AccountUpsert = {
   subtype: 'checking',
   mask: '4821',
   iso_currency_code: 'USD',
-  available_balance: 1200.5,
-  current_balance: 1250.0,
+  available_balance_cents: 120_050, // $1,200.50
+  current_balance_cents: 125_000, // $1,250.00
 };
 
-/** Plaid-native sign: positive amount means money left the account. */
+/**
+ * Amounts are integer cents. Plaid-native sign: positive means money left the
+ * account.
+ */
 function txn(id: string, over: Partial<TransactionRow> = {}): TransactionRow {
   return {
     id,
     account_id: 'acc_1',
     date: '2026-07-01',
     description: 'COSTCO WHSE',
-    amount: 52.13,
+    amount_cents: 5213, // $52.13
     category_primary: 'GENERAL_MERCHANDISE',
     category_detailed: 'GENERAL_MERCHANDISE_SUPERSTORES',
     counterparty: 'Costco',
@@ -121,9 +125,9 @@ describe('accounts', () => {
   it('preserves last_synced_at across re-upsert', () => {
     const db = freshDb();
     setAccountSynced(db, 'acc_1', 123456);
-    upsertAccount(db, { ...account, available_balance: 900 });
+    upsertAccount(db, { ...account, available_balance_cents: 90_000 });
     const rows = listAccountRows(db);
-    expect(rows[0]?.available_balance).toBe(900);
+    expect(rows[0]?.available_balance_cents).toBe(90_000);
     expect(rows[0]?.last_synced_at).toBe(123456);
   });
 
@@ -141,14 +145,25 @@ describe('transactions', () => {
     const db = freshDb();
     const first = upsertTransactions(db, [txn('t1', { status: 'pending' }), txn('t2')]);
     expect(first).toEqual({ inserted: 2, updated: 0 });
-    const second = upsertTransactions(db, [txn('t1', { status: 'posted', amount: 55.0 })]);
+    const second = upsertTransactions(db, [txn('t1', { status: 'posted', amount_cents: 5500 })]);
     expect(second).toEqual({ inserted: 0, updated: 1 });
     expect(countTransactions(db, 'acc_1')).toBe(2);
     const row = db
-      .prepare('SELECT status, amount FROM transactions WHERE id = ?')
-      .get('t1') as { status: string; amount: number };
+      .prepare('SELECT status, amount_cents FROM transactions WHERE id = ?')
+      .get('t1') as { status: string; amount_cents: number };
     expect(row.status).toBe('posted');
-    expect(row.amount).toBe(55);
+    expect(row.amount_cents).toBe(5500);
+  });
+
+  it('stores amounts as integers, not floats', () => {
+    // Guards the whole point of the cents representation: if a float ever
+    // reaches the column, SQLite's dynamic typing would happily store it.
+    const db = freshDb();
+    upsertTransactions(db, [txn('t1', { amount_cents: 5213 })]);
+    const row = db
+      .prepare("SELECT typeof(amount_cents) AS t FROM transactions WHERE id = 't1'")
+      .get() as { t: string };
+    expect(row.t).toBe('integer');
   });
 
   it('knownTransactionIds returns only existing ids', () => {
@@ -202,7 +217,7 @@ describe('applySyncPage', () => {
       'item_1',
       {
         added: [txn('posted_new', { pending_transaction_id: 'old_pending' })],
-        modified: [txn('old_pending', { status: 'pending', amount: 60 })],
+        modified: [txn('old_pending', { status: 'pending', amount_cents: 6000 })],
         removedIds: ['old_pending'],
       },
       'cursor_1',
@@ -224,7 +239,11 @@ describe('applySyncPage', () => {
     applySyncPage(
       db,
       'item_1',
-      { added: [txn('pend_1', { status: 'pending', amount: 23.0 })], modified: [], removedIds: [] },
+      {
+        added: [txn('pend_1', { status: 'pending', amount_cents: 2300 })],
+        modified: [],
+        removedIds: [],
+      },
       'cursor_1',
     );
     expect(countTransactions(db, 'acc_1')).toBe(1);
@@ -233,7 +252,7 @@ describe('applySyncPage', () => {
       db,
       'item_1',
       {
-        added: [txn('post_1', { amount: 23.5, pending_transaction_id: 'pend_1' })],
+        added: [txn('post_1', { amount_cents: 2350, pending_transaction_id: 'pend_1' })],
         modified: [],
         removedIds: ['pend_1'],
       },
@@ -241,8 +260,10 @@ describe('applySyncPage', () => {
     );
 
     expect(countTransactions(db, 'acc_1')).toBe(1);
-    const total = db.prepare('SELECT SUM(amount) AS s FROM transactions').get() as { s: number };
-    expect(total.s).toBe(23.5);
+    const total = db.prepare('SELECT SUM(amount_cents) AS s FROM transactions').get() as {
+      s: number;
+    };
+    expect(total.s).toBe(2350);
   });
 
   it('leaves the cursor untouched when the page fails to apply', () => {
@@ -282,5 +303,43 @@ describe('openDb', () => {
   it('enforces foreign keys', () => {
     const db = openDb(':memory:');
     expect(() => upsertAccount(db, account)).toThrow(/FOREIGN KEY/i);
+  });
+
+  it('stamps a schema version on a fresh database', () => {
+    const db = openDb(':memory:');
+    expect(db.pragma('user_version', { simple: true })).toBe(1);
+  });
+
+  it('reopens its own database without complaint', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ledger-db-test-'));
+    tmpDbDir = dir;
+    const dbPath = join(dir, 'test.db');
+    openDb(dbPath).close();
+    expect(() => openDb(dbPath).close()).not.toThrow();
+  });
+
+  it('refuses a pre-versioning database instead of silently mismatching columns', () => {
+    // CREATE TABLE IF NOT EXISTS no-ops against an existing table, so an old
+    // file would keep its REAL dollar columns and fail later on insert with a
+    // confusing missing-column error. Fail here, with instructions, instead.
+    const dir = mkdtempSync(join(tmpdir(), 'ledger-db-test-'));
+    tmpDbDir = dir;
+    const dbPath = join(dir, 'legacy.db');
+    const legacy = new Database(dbPath);
+    legacy.exec('CREATE TABLE transactions (id TEXT PRIMARY KEY, amount REAL)');
+    legacy.close(); // user_version stays 0
+
+    expect(() => openDb(dbPath)).toThrow(/older build with an incompatible schema/);
+  });
+
+  it('refuses a database written by a newer build', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ledger-db-test-'));
+    tmpDbDir = dir;
+    const dbPath = join(dir, 'future.db');
+    const future = new Database(dbPath);
+    future.pragma('user_version = 99');
+    future.close();
+
+    expect(() => openDb(dbPath)).toThrow(/schema version 99/);
   });
 });

@@ -98,7 +98,9 @@ function dbWithItem(): Db {
 describe('toTransactionRow', () => {
   it('maps Plaid fields and preserves the native sign', () => {
     const row = toTransactionRow(txn('t1'));
-    expect(row.amount).toBe(4.5); // positive = outflow, NOT negated
+    // Plaid sends 4.5 decimal dollars; storage is 450 cents, still positive
+    // because positive is an outflow. The sign is NOT negated.
+    expect(row.amount_cents).toBe(450);
     expect(row.description).toBe('COFFEE');
     expect(row.counterparty).toBe('Blue Bottle');
     expect(row.category_primary).toBe('FOOD_AND_DRINK');
@@ -108,7 +110,14 @@ describe('toTransactionRow', () => {
   });
 
   it('keeps inflows negative', () => {
-    expect(toTransactionRow(txn('t1', { amount: -2000 })).amount).toBe(-2000);
+    expect(toTransactionRow(txn('t1', { amount: -2000 })).amount_cents).toBe(-200_000);
+  });
+
+  it('converts amounts that a naive float multiply would round down', () => {
+    // 12.34 * 100 is 1233.9999999999998 in IEEE 754. Truncating would lose a
+    // cent on a large share of real transactions.
+    expect(toTransactionRow(txn('t1', { amount: 12.34 })).amount_cents).toBe(1234);
+    expect(toTransactionRow(txn('t1', { amount: 129.95 })).amount_cents).toBe(12_995);
   });
 
   it('derives status from the pending boolean', () => {
@@ -132,8 +141,8 @@ describe('toAccountUpsert', () => {
       id: 'acc_1',
       item_id: 'item_1',
       institution: 'Chase',
-      available_balance: 100,
-      current_balance: 120,
+      available_balance_cents: 10_000,
+      current_balance_cents: 12_000,
       iso_currency_code: 'USD',
     });
   });
@@ -176,7 +185,7 @@ describe('syncAll', () => {
     expect(countTransactions(db, 'acc_1')).toBe(3);
     expect(getItem(db, 'item_1')?.cursor).toBe('c2');
     expect(listAccountRows(db)[0]?.last_synced_at).toBe(999);
-    expect(listAccountRows(db)[0]?.available_balance).toBe(100);
+    expect(listAccountRows(db)[0]?.available_balance_cents).toBe(10_000);
   });
 
   it('sends the stored cursor so a second sync is incremental', async () => {
@@ -225,8 +234,10 @@ describe('syncAll', () => {
     // The pending row must be gone, not merely superseded.
     expect(countTransactions(db, 'acc_1')).toBe(1);
     expect(results[0]).toMatchObject({ inserted: 1, removed: 1 });
-    const total = db.prepare('SELECT SUM(amount) AS s FROM transactions').get() as { s: number };
-    expect(total.s).toBe(5);
+    const total = db.prepare('SELECT SUM(amount_cents) AS s FROM transactions').get() as {
+      s: number;
+    };
+    expect(total.s).toBe(500);
   });
 
   it('attributes counts to the right account within one Item', async () => {

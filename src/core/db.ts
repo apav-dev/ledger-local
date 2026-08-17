@@ -27,8 +27,10 @@ export interface AccountRow {
   mask: string | null;
   /** Null when the account reports an unofficial currency (e.g. crypto). */
   iso_currency_code: string | null;
-  available_balance: number | null;
-  current_balance: number | null;
+  /** Integer cents. Null when the institution does not report the balance. */
+  available_balance_cents: number | null;
+  /** Integer cents. Null when the institution does not report the balance. */
+  current_balance_cents: number | null;
   last_synced_at: number | null;
 }
 
@@ -40,11 +42,15 @@ export interface TransactionRow {
   date: string;
   description: string;
   /**
+   * Integer cents, never decimal dollars — 4599 means $45.99. Converted from
+   * Plaid's decimal dollars at ingest and back to dollars only at the output
+   * boundary in views.ts.
+   *
    * Plaid-native sign: POSITIVE is money leaving the account, NEGATIVE is money
    * arriving. This is the inverse of a bank statement. Every spend predicate in
    * queries.ts depends on it.
    */
-  amount: number;
+  amount_cents: number;
   category_primary: string | null;
   category_detailed: string | null;
   counterparty: string | null;
@@ -65,6 +71,14 @@ export interface SyncPage {
   removedIds: string[];
 }
 
+/**
+ * Bumped whenever the schema changes. Stored in `PRAGMA user_version` so a
+ * database written by an older build is rejected loudly instead of failing later
+ * with a confusing missing-column error — `CREATE TABLE IF NOT EXISTS` silently
+ * no-ops against an existing table with different columns.
+ */
+const SCHEMA_VERSION = 1;
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS items (
   id              TEXT PRIMARY KEY,
@@ -75,25 +89,25 @@ CREATE TABLE IF NOT EXISTS items (
   created_at      INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS accounts (
-  id                 TEXT PRIMARY KEY,
-  item_id            TEXT NOT NULL REFERENCES items(id),
-  name               TEXT NOT NULL,
-  official_name      TEXT,
-  institution        TEXT NOT NULL,
-  type               TEXT NOT NULL,
-  subtype            TEXT,
-  mask               TEXT,
-  iso_currency_code  TEXT,
-  available_balance  REAL,
-  current_balance    REAL,
-  last_synced_at     INTEGER
+  id                      TEXT PRIMARY KEY,
+  item_id                 TEXT NOT NULL REFERENCES items(id),
+  name                    TEXT NOT NULL,
+  official_name           TEXT,
+  institution             TEXT NOT NULL,
+  type                    TEXT NOT NULL,
+  subtype                 TEXT,
+  mask                    TEXT,
+  iso_currency_code       TEXT,
+  available_balance_cents INTEGER,
+  current_balance_cents   INTEGER,
+  last_synced_at          INTEGER
 );
 CREATE TABLE IF NOT EXISTS transactions (
   id                     TEXT PRIMARY KEY,
   account_id             TEXT NOT NULL REFERENCES accounts(id),
   date                   TEXT NOT NULL,
   description            TEXT NOT NULL,
-  amount                 REAL NOT NULL,
+  amount_cents           INTEGER NOT NULL,
   category_primary       TEXT,
   category_detailed      TEXT,
   counterparty           TEXT,
@@ -107,12 +121,56 @@ CREATE INDEX IF NOT EXISTS idx_txn_category ON transactions(category_primary);
 CREATE INDEX IF NOT EXISTS idx_acct_item ON accounts(item_id);
 `;
 
+/** True when the core tables already exist, i.e. something wrote this file before. */
+function hasCoreTables(db: Db): boolean {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM sqlite_master
+       WHERE type = 'table' AND name IN ('items', 'accounts', 'transactions')`,
+    )
+    .get() as { n: number };
+  return row.n > 0;
+}
+
+/**
+ * Creates the schema on a fresh database, or verifies an existing one matches
+ * this build. There are no migrations: the tool has never shipped, so any
+ * mismatch means a database from a pre-release build, and the honest fix is to
+ * delete it and re-sync from Plaid rather than carry migration code forever.
+ */
+function applySchema(db: Db, dbPath: string): void {
+  const version = db.pragma('user_version', { simple: true }) as number;
+
+  if (version === SCHEMA_VERSION) return;
+
+  if (version === 0) {
+    // Version 0 with tables present means a pre-versioning build wrote this
+    // file. Its columns differ (amounts were REAL dollars, not INTEGER cents),
+    // and CREATE TABLE IF NOT EXISTS would leave them in place.
+    if (hasCoreTables(db)) {
+      throw new Error(
+        `${dbPath} was created by an older build with an incompatible schema. ` +
+          `No data is lost by deleting it — every row is re-downloadable from Plaid. ` +
+          `Delete the file (and its -wal/-shm siblings), then run \`ledger sync\`.`,
+      );
+    }
+    db.exec(SCHEMA);
+    db.pragma(`user_version = ${SCHEMA_VERSION}`);
+    return;
+  }
+
+  throw new Error(
+    `${dbPath} has schema version ${version}, but this build expects ${SCHEMA_VERSION}. ` +
+      `A newer version of ledger wrote this database — upgrade instead of downgrading.`,
+  );
+}
+
 export function openDb(dbPath: string): Db {
   const fresh = dbPath !== ':memory:' && !fs.existsSync(dbPath);
   const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
-  db.exec(SCHEMA);
+  applySchema(db, dbPath);
   if (fresh) fs.chmodSync(dbPath, 0o600);
   if (dbPath !== ':memory:') {
     // WAL and shm carry the same row data as the main file, so they need the
@@ -169,22 +227,22 @@ export function upsertAccount(db: Db, row: AccountUpsert): void {
   db.prepare(
     `INSERT INTO accounts (
        id, item_id, name, official_name, institution, type, subtype, mask,
-       iso_currency_code, available_balance, current_balance, last_synced_at
+       iso_currency_code, available_balance_cents, current_balance_cents, last_synced_at
      ) VALUES (
        @id, @item_id, @name, @official_name, @institution, @type, @subtype, @mask,
-       @iso_currency_code, @available_balance, @current_balance, NULL
+       @iso_currency_code, @available_balance_cents, @current_balance_cents, NULL
      )
      ON CONFLICT(id) DO UPDATE SET
-       item_id           = excluded.item_id,
-       name              = excluded.name,
-       official_name     = excluded.official_name,
-       institution       = excluded.institution,
-       type              = excluded.type,
-       subtype           = excluded.subtype,
-       mask              = excluded.mask,
-       iso_currency_code = excluded.iso_currency_code,
-       available_balance = excluded.available_balance,
-       current_balance   = excluded.current_balance`,
+       item_id                 = excluded.item_id,
+       name                    = excluded.name,
+       official_name           = excluded.official_name,
+       institution             = excluded.institution,
+       type                    = excluded.type,
+       subtype                 = excluded.subtype,
+       mask                    = excluded.mask,
+       iso_currency_code       = excluded.iso_currency_code,
+       available_balance_cents = excluded.available_balance_cents,
+       current_balance_cents   = excluded.current_balance_cents`,
   ).run(row);
 }
 
@@ -248,16 +306,16 @@ export function upsertTransactions(
   );
   const stmt = db.prepare(
     `INSERT INTO transactions (
-       id, account_id, date, description, amount, category_primary, category_detailed,
+       id, account_id, date, description, amount_cents, category_primary, category_detailed,
        counterparty, status, type, pending_transaction_id
      ) VALUES (
-       @id, @account_id, @date, @description, @amount, @category_primary, @category_detailed,
+       @id, @account_id, @date, @description, @amount_cents, @category_primary, @category_detailed,
        @counterparty, @status, @type, @pending_transaction_id
      )
      ON CONFLICT(id) DO UPDATE SET
        date                   = excluded.date,
        description            = excluded.description,
-       amount                 = excluded.amount,
+       amount_cents           = excluded.amount_cents,
        category_primary       = excluded.category_primary,
        category_detailed      = excluded.category_detailed,
        counterparty           = excluded.counterparty,

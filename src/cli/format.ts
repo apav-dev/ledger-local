@@ -1,10 +1,18 @@
-export function money(n: number | null): string {
-  if (n === null) return '—';
-  const sign = n < 0 ? '-' : '';
-  return `${sign}$${Math.abs(n).toLocaleString('en-US', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  })}`;
+/**
+ * Formats integer cents as a dollar string.
+ *
+ * Splits the integer before formatting so no float ever enters the display path.
+ * The old dollars-based version leaned on `toLocaleString`'s rounding, which
+ * disagrees with nearest-cent on true half-cent values — `2.675` renders as
+ * `$2.67` when the correct answer is `$2.68`.
+ */
+export function money(cents: number | null): string {
+  if (cents === null) return '—';
+  const abs = Math.abs(cents);
+  const whole = Math.trunc(abs / 100);
+  const frac = abs % 100;
+  const sign = cents < 0 ? '-' : '';
+  return `${sign}$${whole.toLocaleString('en-US')}.${String(frac).padStart(2, '0')}`;
 }
 
 export function formatTable(rows: Array<Record<string, unknown>>): string {

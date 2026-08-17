@@ -61,23 +61,38 @@ describe('listTransactions', () => {
     // Plaid-native sign: the paycheck is negative, spending is positive.
     const db = seedDb();
     const income = listTransactions(db, { category: 'INCOME' }, () => NOW);
-    expect(income.transactions[0]?.amount).toBe(-2000);
+    expect(income.transactions[0]?.amount_cents).toBe(-200_000);
   });
 });
 
 describe('spendingSummary', () => {
   it('groups spend by category, excluding pending and inflows by default', () => {
     const db = seedDb();
-    const { groups, grandTotal } = spendingSummary(
+    const { groups, grandTotalCents } = spendingSummary(
       db,
       { from: '2026-07-01', to: '2026-08-31', groupBy: 'category' },
       () => NOW,
     );
-    // spend: GROCERIES 80, TRAVEL 40, FOOD_AND_DRINK 20.
+    // spend: GROCERIES $80, TRAVEL $40, FOOD_AND_DRINK $20.
     // t5 excluded (pending), t4 excluded (inflow, negative under Plaid signs).
-    expect(grandTotal).toBe(140);
-    expect(groups[0]).toMatchObject({ key: 'GROCERIES', total: 80, count: 2 });
+    expect(grandTotalCents).toBe(14_000);
+    expect(groups[0]).toMatchObject({ key: 'GROCERIES', totalCents: 8000, count: 2 });
     expect(groups[0]?.share).toBeCloseTo(80 / 140);
+  });
+
+  it('sums cents exactly, with no float drift', () => {
+    // The representational payoff: an integer SUM cannot accumulate error, so
+    // the total is exact rather than merely close.
+    const db = seedDb();
+    db.prepare('UPDATE transactions SET amount_cents = 1234 WHERE status = ?').run('posted');
+    const { grandTotalCents } = spendingSummary(
+      db,
+      { from: '2026-07-01', to: '2026-08-31', groupBy: 'category', includeInflows: true },
+      () => NOW,
+    );
+    // 5 posted rows at 1234 cents each. Exactly, not 6169.999999999999.
+    expect(grandTotalCents).toBe(6170);
+    expect(Number.isInteger(grandTotalCents)).toBe(true);
   });
 
   it('never reports a negative total even when inflows are included', () => {
@@ -88,8 +103,8 @@ describe('spendingSummary', () => {
       { from: '2026-07-01', to: '2026-08-31', groupBy: 'category', includeInflows: true },
       () => NOW,
     );
-    expect(groups.every(g => g.total > 0)).toBe(true);
-    expect(groups.find(g => g.key === 'INCOME')?.total).toBe(2000);
+    expect(groups.every(g => g.totalCents > 0)).toBe(true);
+    expect(groups.find(g => g.key === 'INCOME')?.totalCents).toBe(200_000);
   });
 
   it('excludes the paycheck from default spend', () => {
@@ -109,9 +124,9 @@ describe('spendingSummary', () => {
       { from: '2026-07-01', to: '2026-08-31', groupBy: 'month', includePending: true },
       () => NOW,
     );
-    // August spend incl. pending: 50 + 30 + 99 + 40 = 219
-    expect(groups.find(g => g.key === '2026-08')?.total).toBe(219);
-    expect(groups.find(g => g.key === '2026-07')?.total).toBe(20);
+    // August spend incl. pending: $50 + $30 + $99 + $40 = $219
+    expect(groups.find(g => g.key === '2026-08')?.totalCents).toBe(21_900);
+    expect(groups.find(g => g.key === '2026-07')?.totalCents).toBe(2000);
   });
 
   it('groups merchants with unknown fallback', () => {
@@ -136,13 +151,13 @@ describe('spendingSummary', () => {
   });
 
   it('returns zero shares rather than dividing by zero on an empty range', () => {
-    const { groups, grandTotal } = spendingSummary(
+    const { groups, grandTotalCents } = spendingSummary(
       seedDb(),
       { from: '2020-01-01', to: '2020-01-31', groupBy: 'category' },
       () => NOW,
     );
     expect(groups).toEqual([]);
-    expect(grandTotal).toBe(0);
+    expect(grandTotalCents).toBe(0);
   });
 });
 

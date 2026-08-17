@@ -67,6 +67,19 @@ statement:**
 totals**, so you never need to reason about the sign when looking at rollups.
 Only raw transaction rows expose the convention.
 
+### Amounts are stored as integer cents
+
+The database stores money as `INTEGER` cents (`amount_cents`,
+`current_balance_cents`), never as floating-point dollars, so sums are exact and
+equality comparisons are safe. Everything that leaves the process — `--json`,
+every MCP tool result — is converted back to decimal dollars under the ordinary
+field names (`amount`, `current_balance`, `total`). Nothing outside the process
+sees cents, so there is no scale to keep track of.
+
+The conversion happens in one place each way: `src/core/money.ts` at ingest,
+`src/core/views.ts` on output. Both frontends share the same views, so the CLI
+and MCP cannot report different numbers.
+
 ## MCP
 
 Register `dist/mcp/index.js` as a stdio MCP server. Tools: `list_accounts`,
@@ -78,6 +91,11 @@ repairing a bank are CLI-only — both need a human at a browser.
 - Config: `~/.config/ledger/config.json` (chmod 600; contains your Plaid secret)
 - Database: `~/.local/share/ledger/ledger.db` (chmod 600; contains access tokens)
 - Override with `LEDGER_CONFIG_DIR` / `LEDGER_DATA_DIR`.
+
+The database records its schema version in `PRAGMA user_version`. There are no
+migrations: if a database was written by an incompatible build, the CLI says so
+and asks you to delete the file. Nothing is lost — every row is re-downloadable
+from Plaid.
 
 ## How sync works
 

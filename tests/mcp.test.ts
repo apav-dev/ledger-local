@@ -135,6 +135,39 @@ describe('mcp server', () => {
     });
   });
 
+  describe('money is dollars on the wire', () => {
+    // Storage is integer cents. If a cents value ever reached a model it would
+    // report a 100x figure — a worse error than the sign hazard above, and one
+    // with no warning text to catch it. Every tool result must be dollars.
+    it('emits dollar amounts, not cents', async () => {
+      const client = await connect();
+      const txns = textOf(
+        await client.callTool({ name: 'list_transactions', arguments: { search: 'costco' } }),
+      ) as { transactions: Array<{ amount: number }> };
+      expect(txns.transactions[0]?.amount).toBe(50); // 5000 cents
+
+      const accounts = textOf(await client.callTool({ name: 'list_accounts', arguments: {} })) as {
+        accounts: Array<{ id: string; current_balance: number | null }>;
+      };
+      expect(accounts.accounts.find(a => a.id === 'acc_1')?.current_balance).toBe(500);
+    });
+
+    it('exposes no cent-denominated field on any tool', async () => {
+      const client = await connect();
+      const payloads = await Promise.all([
+        client.callTool({ name: 'list_accounts', arguments: {} }),
+        client.callTool({ name: 'list_transactions', arguments: {} }),
+        client.callTool({
+          name: 'spending_summary',
+          arguments: { from: '2026-07-01', to: '2026-08-31', groupBy: 'category' },
+        }),
+      ]);
+      for (const payload of payloads) {
+        expect(rawText(payload)).not.toMatch(/cents/i);
+      }
+    });
+  });
+
   describe('reauth guidance', () => {
     const reauthApi: LedgerPlaidApi = {
       ...noApi,

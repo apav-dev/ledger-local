@@ -9,6 +9,7 @@ import {
   type ItemRow,
   type TransactionRow,
 } from './db.js';
+import { toCents, toCentsOrNull } from './money.js';
 import { isReauthRequired, type LedgerPlaidApi } from './plaid-client.js';
 
 /** Plaid caps `/transactions/sync` at 500 updates per page. */
@@ -36,8 +37,9 @@ export function toTransactionRow(t: Transaction): TransactionRow {
     account_id: t.account_id,
     date: t.date,
     description: t.name,
-    // Stored exactly as Plaid sends it: POSITIVE means money left the account.
-    amount: t.amount,
+    // The one place decimal dollars become integer cents. The sign is kept
+    // exactly as Plaid sends it: POSITIVE means money left the account.
+    amount_cents: toCents(t.amount),
     category_primary: t.personal_finance_category?.primary ?? null,
     category_detailed: t.personal_finance_category?.detailed ?? null,
     counterparty: t.merchant_name ?? null,
@@ -64,8 +66,8 @@ export function toAccountUpsert(
     // Plaid populates exactly one of these; unofficial covers crypto and similar.
     iso_currency_code:
       a.balances.iso_currency_code ?? a.balances.unofficial_currency_code ?? null,
-    available_balance: a.balances.available,
-    current_balance: a.balances.current,
+    available_balance_cents: toCentsOrNull(a.balances.available),
+    current_balance_cents: toCentsOrNull(a.balances.current),
   };
 }
 

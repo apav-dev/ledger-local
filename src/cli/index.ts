@@ -13,6 +13,13 @@ import {
 } from '../core/queries.js';
 import { clientFromConfig, isReauthRequired } from '../core/plaid-client.js';
 import { syncAll, type AccountSyncResult } from '../core/sync.js';
+// Money is stored as integer cents; --json emits dollars through these views, the
+// same ones the MCP server uses, so the two frontends cannot disagree.
+import {
+  accountsResultView,
+  spendingResultView,
+  transactionsResultView,
+} from '../core/views.js';
 import { formatTable, money } from './format.js';
 
 const EXIT_GENERAL = 1;
@@ -175,11 +182,12 @@ program
   .description('list accounts with balances (from local db)')
   .action(
     withCtx(program, ({ db, json }) => {
-      const { accounts, meta } = listAccounts(db);
+      const result = listAccounts(db);
       if (json) {
-        process.stdout.write(JSON.stringify({ accounts, meta }, null, 2) + '\n');
+        process.stdout.write(JSON.stringify(accountsResultView(result), null, 2) + '\n');
         return;
       }
+      const { accounts, meta } = result;
       process.stdout.write(
         formatTable(
           accounts.map(a => ({
@@ -187,8 +195,8 @@ program
             name: a.name,
             type: a.type,
             mask: a.mask ?? '',
-            available: money(a.available_balance),
-            current: money(a.current_balance),
+            available: money(a.available_balance_cents),
+            current: money(a.current_balance_cents),
           })),
         ) + `\n${meta.stale ? 'STALE — run `ledger sync`' : 'fresh'}\n`,
       );
@@ -233,14 +241,14 @@ program
           ...(opts.limit !== undefined && { limit: Number(opts.limit) }),
         });
         if (json) {
-          process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+          process.stdout.write(JSON.stringify(transactionsResultView(result), null, 2) + '\n');
           return;
         }
         process.stdout.write(
           formatTable(
             result.transactions.map(t => ({
               date: t.date,
-              amount: money(t.amount),
+              amount: money(t.amount_cents),
               description: t.description,
               category: t.category_primary ?? '',
               status: t.status,
@@ -287,18 +295,18 @@ program
           ...(opts.includeInflows === true && { includeInflows: true }),
         });
         if (json) {
-          process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+          process.stdout.write(JSON.stringify(spendingResultView(result), null, 2) + '\n');
           return;
         }
         process.stdout.write(
           formatTable(
             result.groups.map(g => ({
               [groupBy]: g.key,
-              total: money(g.total),
+              total: money(g.totalCents),
               count: g.count,
               share: `${(g.share * 100).toFixed(1)}%`,
             })),
-          ) + `\ntotal: ${money(result.grandTotal)}\n`,
+          ) + `\ntotal: ${money(result.grandTotalCents)}\n`,
         );
       },
     ),

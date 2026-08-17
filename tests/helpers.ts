@@ -12,8 +12,8 @@ import {
 export const NOW = Date.UTC(2026, 7, 17); // 2026-08-17
 
 /**
- * Amounts follow Plaid's convention: POSITIVE is money leaving the account,
- * NEGATIVE is income. t4 is the only inflow.
+ * Amounts are integer cents following Plaid's convention: POSITIVE is money
+ * leaving the account, NEGATIVE is income. t4 is the only inflow.
  */
 export function seedDb(): Db {
   const db = openDb(':memory:');
@@ -28,29 +28,29 @@ export function seedDb(): Db {
   upsertAccount(db, {
     id: 'acc_1', item_id: 'item_1', name: 'Checking', official_name: 'Total Checking',
     institution: 'Chase', type: 'depository', subtype: 'checking', mask: '1111',
-    iso_currency_code: 'USD', available_balance: 500, current_balance: 500,
+    iso_currency_code: 'USD', available_balance_cents: 50_000, current_balance_cents: 50_000,
   });
   upsertAccount(db, {
     id: 'acc_2', item_id: 'item_1', name: 'Card', official_name: 'Freedom Card',
     institution: 'Chase', type: 'credit', subtype: 'credit card', mask: '2222',
-    iso_currency_code: 'USD', available_balance: -200, current_balance: -200,
+    iso_currency_code: 'USD', available_balance_cents: -20_000, current_balance_cents: -20_000,
   });
   setAccountSynced(db, 'acc_1', NOW - 60_000); // 1 min ago
   setAccountSynced(db, 'acc_2', NOW - 60_000);
 
   const t = (id: string, over: Partial<TransactionRow>): TransactionRow => ({
-    id, account_id: 'acc_1', date: '2026-08-10', description: 'X', amount: 10,
+    id, account_id: 'acc_1', date: '2026-08-10', description: 'X', amount_cents: 1000,
     category_primary: null, category_detailed: null, counterparty: null,
     status: 'posted', type: 'in store', pending_transaction_id: null, ...over,
   });
 
   upsertTransactions(db, [
-    t('t1', { amount: 50, category_primary: 'GROCERIES', counterparty: 'Costco', date: '2026-08-01' }),
-    t('t2', { amount: 30, category_primary: 'GROCERIES', counterparty: 'Safeway', date: '2026-08-05' }),
-    t('t3', { amount: 20, category_primary: 'FOOD_AND_DRINK', counterparty: 'Blue Bottle', date: '2026-07-20' }),
-    t('t4', { amount: -2000, category_primary: 'INCOME', counterparty: 'Employer', date: '2026-08-01' }),
-    t('t5', { amount: 99, category_primary: 'FOOD_AND_DRINK', counterparty: 'Sushi', status: 'pending', date: '2026-08-15' }),
-    t('t6', { amount: 40, category_primary: 'TRAVEL', counterparty: 'BART', account_id: 'acc_2', date: '2026-08-08' }),
+    t('t1', { amount_cents: 5000, category_primary: 'GROCERIES', counterparty: 'Costco', date: '2026-08-01' }),
+    t('t2', { amount_cents: 3000, category_primary: 'GROCERIES', counterparty: 'Safeway', date: '2026-08-05' }),
+    t('t3', { amount_cents: 2000, category_primary: 'FOOD_AND_DRINK', counterparty: 'Blue Bottle', date: '2026-07-20' }),
+    t('t4', { amount_cents: -200_000, category_primary: 'INCOME', counterparty: 'Employer', date: '2026-08-01' }),
+    t('t5', { amount_cents: 9900, category_primary: 'FOOD_AND_DRINK', counterparty: 'Sushi', status: 'pending', date: '2026-08-15' }),
+    t('t6', { amount_cents: 4000, category_primary: 'TRAVEL', counterparty: 'BART', account_id: 'acc_2', date: '2026-08-08' }),
   ]);
   return db;
 }

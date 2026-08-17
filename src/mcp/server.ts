@@ -5,6 +5,13 @@ import type { Db } from '../core/db.js';
 import { authStatus, listAccounts, listTransactions, spendingSummary } from '../core/queries.js';
 import { isReauthRequired, type LedgerPlaidApi } from '../core/plaid-client.js';
 import { syncAll } from '../core/sync.js';
+// Money is stored as integer cents. Every tool result goes through a view so the
+// model always sees decimal dollars — the same views the CLI's --json output uses.
+import {
+  accountsResultView,
+  spendingResultView,
+  transactionsResultView,
+} from '../core/views.js';
 
 interface Deps {
   db: Db;
@@ -50,7 +57,7 @@ export function buildMcpServer(deps: Deps): McpServer {
     },
     async () => {
       try {
-        return ok(listAccounts(deps.db));
+        return ok(accountsResultView(listAccounts(deps.db)));
       } catch (error) {
         return err(error);
       }
@@ -88,7 +95,7 @@ export function buildMcpServer(deps: Deps): McpServer {
     },
     async args => {
       try {
-        return ok(listTransactions(deps.db, args));
+        return ok(transactionsResultView(listTransactions(deps.db, args)));
       } catch (error) {
         return err(error);
       }
@@ -115,7 +122,7 @@ export function buildMcpServer(deps: Deps): McpServer {
     },
     async args => {
       try {
-        return ok(spendingSummary(deps.db, args));
+        return ok(spendingResultView(spendingSummary(deps.db, args)));
       } catch (error) {
         return err(error);
       }

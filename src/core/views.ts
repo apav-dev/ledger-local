@@ -47,19 +47,12 @@ export function accountView(row: AccountRow): AccountView {
 }
 
 export function transactionView(row: TransactionRow): TransactionView {
+  const { amount_cents, ...rest } = row;
   return {
-    id: row.id,
-    account_id: row.account_id,
-    date: row.date,
-    description: row.description,
-    // Sign is untouched: POSITIVE is still money leaving the account.
-    amount: centsToDollars(row.amount_cents),
-    category_primary: row.category_primary,
-    category_detailed: row.category_detailed,
-    counterparty: row.counterparty,
-    status: row.status,
-    type: row.type,
-    pending_transaction_id: row.pending_transaction_id,
+    ...rest,
+    // The only transformation at this boundary. Sign is untouched: POSITIVE is
+    // still money leaving the account.
+    amount: centsToDollars(amount_cents),
   };
 }
 
@@ -81,13 +74,68 @@ export function accountsResultView(result: { accounts: AccountRow[]; meta: Query
   return { accounts: result.accounts.map(accountView), meta: result.meta };
 }
 
-export function transactionsResultView(result: {
-  transactions: TransactionRow[];
+/**
+ * The subset of a transaction an agent reasons with.
+ *
+ * Storage keeps every field Plaid sends, because re-fetching is only free until
+ * a bank is linked. A tool result is a different problem: forty-three fields
+ * times a hundred rows is mostly nulls, and every null spends context the model
+ * needs for the actual question. Nothing here is hidden — callers that want the
+ * whole row ask for it.
+ */
+export type LeanTransactionView = Pick<
+  TransactionView,
+  | 'id'
+  | 'account_id'
+  | 'date'
+  | 'authorized_date'
+  | 'description'
+  | 'amount'
+  | 'category_primary'
+  | 'category_detailed'
+  | 'category_confidence'
+  | 'counterparty'
+  | 'counterparty_type'
+  | 'merchant_entity_id'
+  | 'payment_channel'
+  | 'status'
+  | 'iso_currency_code'
+>;
+
+export function leanTransactionView(row: TransactionRow): LeanTransactionView {
+  const full = transactionView(row);
+  return {
+    id: full.id,
+    account_id: full.account_id,
+    date: full.date,
+    authorized_date: full.authorized_date,
+    description: full.description,
+    amount: full.amount,
+    category_primary: full.category_primary,
+    category_detailed: full.category_detailed,
+    category_confidence: full.category_confidence,
+    counterparty: full.counterparty,
+    counterparty_type: full.counterparty_type,
+    merchant_entity_id: full.merchant_entity_id,
+    payment_channel: full.payment_channel,
+    status: full.status,
+    iso_currency_code: full.iso_currency_code,
+  };
+}
+
+export function transactionsResultView(
+  result: { transactions: TransactionRow[]; total: number; meta: QueryMeta },
+  opts: { verbose?: boolean | undefined } = {},
+): {
+  transactions: Array<TransactionView | LeanTransactionView>;
   total: number;
   meta: QueryMeta;
-}): { transactions: TransactionView[]; total: number; meta: QueryMeta } {
+} {
+  // Lean by default: the MCP server is the high-volume caller and the one with
+  // a context budget. The CLI passes verbose and gets everything.
+  const project = opts.verbose === true ? transactionView : leanTransactionView;
   return {
-    transactions: result.transactions.map(transactionView),
+    transactions: result.transactions.map(project),
     total: result.total,
     meta: result.meta,
   };

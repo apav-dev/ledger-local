@@ -268,17 +268,34 @@ export function buildMcpServer(deps: Deps): McpServer {
         'inserted/updated/removed counts. ' +
         'Note on accountId: Plaid refreshes a whole bank connection at once, so passing ' +
         'accountId still refreshes every account at that institution — it only narrows what ' +
-        'is reported back.',
+        'is reported back. ' +
+        'On force: WITHOUT it, this returns whatever Plaid last pulled from the bank, which ' +
+        'it does on its own schedule 1-4 times a day — so a transaction from the last few ' +
+        'hours may legitimately be missing. WITH it, Plaid is asked to pull from the bank ' +
+        'right now. Use force ONLY when the answer depends on the last few hours (for ' +
+        'example "did my paycheck arrive today", "did that payment go through"), never as a ' +
+        'routine precaution: it may be billed per call. Even with force the bank-side pull ' +
+        'is asynchronous, so a very recent transaction can still take another sync to appear.',
       inputSchema: {
         accountId: z
           .string()
           .optional()
           .describe('report only this account (its whole institution is still refreshed)'),
+        force: z
+          .boolean()
+          .optional()
+          .describe(
+            'ask Plaid to pull from the bank now rather than using its last scheduled pull. ' +
+              'May be billed per call — only for questions about the last few hours.',
+          ),
       },
     },
     async args => {
       try {
-        const results = await syncAll(deps.db, deps.api, { accountId: args.accountId });
+        const results = await syncAll(deps.db, deps.api, {
+          accountId: args.accountId,
+          force: args.force,
+        });
         if (results.some(r => r.needsReauth)) {
           return {
             content: [{ type: 'text', text: JSON.stringify({ error: REAUTH_GUIDANCE, results }) }],

@@ -375,14 +375,32 @@ program
     'report only this account (Plaid still refreshes its whole institution)',
   )
   .option('--item <id>', 'refresh only this institution')
+  .option(
+    '--force',
+    'ask Plaid to pull from the bank now instead of using its last scheduled pull ' +
+      '(may be billed per call)',
+  )
   .action(
-    withCtx(program, async ({ cfg, db, json }, opts: { account?: string; item?: string }) => {
-      const results = await syncAll(db, clientFromConfig(cfg), {
-        accountId: opts.account,
-        itemId: opts.item,
-      });
-      printSyncResults(results, json);
-    }),
+    withCtx(
+      program,
+      async ({ cfg, db, json }, opts: { account?: string; item?: string; force?: boolean }) => {
+        const results = await syncAll(db, clientFromConfig(cfg), {
+          accountId: opts.account,
+          itemId: opts.item,
+          force: opts.force,
+        });
+        printSyncResults(results, json);
+        // Plaid's pull is asynchronous: the refresh is requested, not completed,
+        // by the time the sync below it runs. Saying so beats a caller
+        // concluding the bank had nothing new.
+        if (opts.force === true && !json) {
+          process.stdout.write(
+            'Asked Plaid to pull from each bank. That pull is asynchronous, so anything it\n' +
+              'finds may only appear on the next `ledger sync`.\n',
+          );
+        }
+      },
+    ),
   );
 
 program

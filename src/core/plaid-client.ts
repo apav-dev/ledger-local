@@ -12,6 +12,7 @@ import {
   type LinkTokenCreateResponse,
   type LinkTokenGetResponse,
   type TransactionsRecurringGetResponse,
+  type TransactionsRefreshResponse,
   type TransactionsSyncResponse,
 } from 'plaid';
 import type { LedgerConfig, PlaidEnvironment } from './config.js';
@@ -208,6 +209,12 @@ export interface LedgerPlaidApi {
    * `removed` list — callers must replace their stored set, not merge into it.
    */
   getRecurringStreams(accessToken: string): Promise<TransactionsRecurringGetResponse>;
+  /**
+   * Asks Plaid to pull from the institution now rather than on its own 1-4x
+   * daily schedule. Returns no data — new transactions arrive through the next
+   * `/transactions/sync`, and not necessarily immediately.
+   */
+  refreshTransactions(accessToken: string): Promise<void>;
 }
 
 const RATE_LIMIT_DELAY_MS = 2_000;
@@ -249,6 +256,9 @@ export interface PlaidSdk {
   transactionsRecurringGet(req: {
     access_token: string;
   }): Promise<{ data: TransactionsRecurringGetResponse }>;
+  transactionsRefresh(req: {
+    access_token: string;
+  }): Promise<{ data: TransactionsRefreshResponse }>;
 }
 
 export function sdkFromConfig(
@@ -365,6 +375,18 @@ export class PlaidClient implements LedgerPlaidApi {
         ...(cursor === null ? {} : { cursor }),
       }),
     );
+  }
+
+  /**
+   * Billed per call on some plans, which is why nothing calls this by default.
+   *
+   * Returns void deliberately: the response carries only a request_id, and
+   * handing that back would invite a caller to treat it as a completion signal.
+   */
+  refreshTransactions(accessToken: string): Promise<void> {
+    return this.#call('/transactions/refresh', () =>
+      this.#api.transactionsRefresh({ access_token: accessToken }),
+    ).then(() => undefined);
   }
 
   getRecurringStreams(accessToken: string): Promise<TransactionsRecurringGetResponse> {

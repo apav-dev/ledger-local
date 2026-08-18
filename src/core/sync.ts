@@ -29,6 +29,12 @@ export interface AccountSyncResult {
   removed: number;
   error?: string;
   needsReauth?: boolean | undefined;
+  /**
+   * True when `/transactions/refresh` ran for this account's Item before the
+   * sync. Undefined on a normal sync, so the flag never appears in JSON unless
+   * it happened.
+   */
+  refreshed?: boolean | undefined;
 }
 
 export function toTransactionRow(t: Transaction): TransactionRow {
@@ -135,11 +141,17 @@ async function syncItem(
   item: ItemRow,
   now: () => number,
   maxPages: number,
+  force: boolean,
 ): Promise<AccountSyncResult[]> {
   const names = new Map<string, string>();
   const tallies = new Map<string, Tally>();
 
   try {
+    // Before anything else, or the pull it triggers cannot be picked up by the
+    // sync below. Inside the try so a refresh failure is reported as a failed
+    // Item rather than silently syncing stale data as if the force had worked.
+    if (force) await api.refreshTransactions(item.access_token);
+
     // `/accounts/balance/get` rather than the `accounts` in the sync response:
     // balances elsewhere may be cached, and this endpoint forces a live read.
     const accounts = await api.getAccounts(item.access_token);
@@ -197,7 +209,13 @@ async function syncItem(
     for (const [accountId, accountName] of names) {
       setAccountSynced(db, accountId, ts);
       const tally = tallies.get(accountId) ?? { inserted: 0, updated: 0, removed: 0 };
-      results.push({ accountId, accountName, ok: true, ...tally });
+      results.push({
+        accountId,
+        accountName,
+        ok: true,
+        ...tally,
+        refreshed: force ? true : undefined,
+      });
     }
     return results;
   } catch (error) {
@@ -213,6 +231,7 @@ async function syncItem(
         removed: 0,
         error: error instanceof Error ? error.message : String(error),
         ...(isReauthRequired(error) ? { needsReauth: true } : {}),
+        refreshed: force ? true : undefined,
       },
     ];
   }
@@ -232,6 +251,7 @@ export async function syncAll(
     itemId?: string | undefined;
     now?: (() => number) | undefined;
     maxPages?: number | undefined;
+    force?: boolean | undefined;
   } = {},
 ): Promise<AccountSyncResult[]> {
   const now = opts.now ?? Date.now;
@@ -242,7 +262,7 @@ export async function syncAll(
 
   const results: AccountSyncResult[] = [];
   for (const item of items) {
-    results.push(...(await syncItem(db, api, item, now, maxPages)));
+    results.push(...(await syncItem(db, api, item, now, maxPages, opts.force === true)));
   }
 
   if (opts.accountId === undefined) return results;

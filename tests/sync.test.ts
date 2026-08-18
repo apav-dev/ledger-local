@@ -86,6 +86,11 @@ function fakeApi(
       (async () => {
         throw new Error('unexpected call');
       }),
+    refreshTransactions:
+      overrides.refreshTransactions ??
+      (async () => {
+        throw new Error('unexpected call');
+      }),
   };
 }
 
@@ -545,5 +550,82 @@ describe('syncAll', () => {
 
   it('returns nothing when no items are linked', async () => {
     expect(await syncAll(openDb(':memory:', 'sandbox'), fakeApi())).toEqual([]);
+  });
+});
+
+describe('sync --force', () => {
+  it('does not refresh unless asked', async () => {
+    const db = dbWithItem();
+    let refreshes = 0;
+    const api = fakeApi({
+      refreshTransactions: async () => {
+        refreshes += 1;
+      },
+      syncTransactions: async () => page({ added: [txn('t1')] }),
+    });
+
+    await syncAll(db, api);
+
+    expect(refreshes).toBe(0);
+  });
+
+  it('refreshes once per item before syncing it', async () => {
+    const db = dbWithItem();
+    const order: string[] = [];
+    const api = fakeApi({
+      refreshTransactions: async () => {
+        order.push('refresh');
+      },
+      getAccounts: async () => {
+        order.push('accounts');
+        return [account('acc_1')];
+      },
+      syncTransactions: async () => {
+        order.push('sync');
+        return page({ added: [txn('t1')] });
+      },
+    });
+
+    await syncAll(db, api, { force: true });
+
+    // Refresh must precede the sync, or the pull it triggers cannot be picked up.
+    expect(order[0]).toBe('refresh');
+    expect(order.filter(o => o === 'refresh')).toHaveLength(1);
+  });
+
+  it('marks results as refreshed so the caller can report it', async () => {
+    const db = dbWithItem();
+    const api = fakeApi({
+      refreshTransactions: async () => {},
+      syncTransactions: async () => page({ added: [txn('t1')] }),
+    });
+
+    const results = await syncAll(db, api, { force: true });
+
+    expect(results.every(r => r.refreshed === true)).toBe(true);
+  });
+
+  it('reports a failed refresh as a failed item instead of syncing stale data silently', async () => {
+    const db = dbWithItem();
+    const api = fakeApi({
+      refreshTransactions: async () => {
+        throw new PlaidApiError('nope', 'ITEM_LOGIN_REQUIRED', 'ITEM_ERROR', 400);
+      },
+      syncTransactions: async () => page({ added: [txn('t1')] }),
+    });
+
+    const results = await syncAll(db, api, { force: true });
+
+    expect(results.every(r => r.ok)).toBe(false);
+    expect(results.some(r => r.needsReauth === true)).toBe(true);
+  });
+
+  it('omits the refreshed flag entirely on a normal sync', async () => {
+    const db = dbWithItem();
+    const api = fakeApi({ syncTransactions: async () => page({ added: [txn('t1')] }) });
+
+    const results = await syncAll(db, api);
+
+    expect(results[0]?.refreshed).toBeUndefined();
   });
 });

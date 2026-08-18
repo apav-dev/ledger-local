@@ -19,18 +19,22 @@ const cfg: LedgerConfig = {
 const noApi: LedgerPlaidApi = {
   itemRemove: async () => {},
   getAccounts: async () => [],
-  syncTransactions: async () => ({
-    accounts: [],
-    added: [],
-    modified: [],
-    removed: [],
-    next_cursor: 'c',
-    has_more: false,
-  }) as never,
+  syncTransactions: async () =>
+    ({
+      accounts: [],
+      added: [],
+      modified: [],
+      removed: [],
+      next_cursor: 'c',
+      has_more: false,
+    }) as never,
   createLinkToken: async () => ({ linkToken: 'l', hostedLinkUrl: null }),
   getLinkSession: async () => ({}) as never,
   exchangePublicToken: async () => ({ accessToken: 'a', itemId: 'i' }),
   getRecurringStreams: async () => {
+    throw new Error('unexpected call');
+  },
+  refreshTransactions: async () => {
     throw new Error('unexpected call');
   },
 };
@@ -226,6 +230,54 @@ describe('mcp server', () => {
     const { tools } = await client.listTools();
     const description = tools.find(t => t.name === 'sync')?.description ?? '';
     expect(description).toMatch(/whole bank connection/);
+  });
+
+  describe('sync force', () => {
+    it('does not refresh by default', async () => {
+      let refreshes = 0;
+      const api: LedgerPlaidApi = {
+        ...noApi,
+        refreshTransactions: async () => {
+          refreshes += 1;
+        },
+        getAccounts: async () => [],
+        syncTransactions: async () =>
+          ({
+            accounts: [],
+            added: [],
+            modified: [],
+            removed: [],
+            next_cursor: 'c',
+            has_more: false,
+          }) as never,
+      };
+      const client = await connect(api);
+      await client.callTool({ name: 'sync', arguments: {} });
+      expect(refreshes).toBe(0);
+    });
+
+    it('refreshes when force is true', async () => {
+      let refreshes = 0;
+      const api: LedgerPlaidApi = {
+        ...noApi,
+        refreshTransactions: async () => {
+          refreshes += 1;
+        },
+        getAccounts: async () => [],
+        syncTransactions: async () =>
+          ({
+            accounts: [],
+            added: [],
+            modified: [],
+            removed: [],
+            next_cursor: 'c',
+            has_more: false,
+          }) as never,
+      };
+      const client = await connect(api);
+      await client.callTool({ name: 'sync', arguments: { force: true } });
+      expect(refreshes).toBe(1);
+    });
   });
 
   describe('list_categories', () => {

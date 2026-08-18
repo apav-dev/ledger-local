@@ -79,6 +79,7 @@ ledger auth repair <item_id>      re-authenticate an existing bank
 ledger auth consent [item_id]     grant full product consent (update mode)
 ledger item remove <item_id>      permanently delete a bank connection
 ledger sync [--account|--item id] refresh from Plaid
+ledger sync --force               make Plaid pull from the bank now
 ledger accounts                   balances (local)
 ledger transactions [filters]     query (local)
 ledger spending --from --to       rollups (local)
@@ -313,6 +314,26 @@ Sync also applies Plaid's `removed` list. This matters: when a pending
 transaction posts, Plaid assigns the posted row a **new** `transaction_id` and
 returns the old pending id under `removed`. Skipping the delete would
 double-count that spend forever.
+
+### `--force`: making Plaid pull now
+
+Plaid checks each institution on its own schedule, roughly one to four times a
+day. A plain `ledger sync` returns whatever that last check found, so a
+transaction from the last few hours can be legitimately missing with nothing to
+indicate it.
+
+`ledger sync --force` calls `/transactions/refresh` first, which asks Plaid to
+go to the bank immediately.
+
+Two caveats, both real:
+
+- **It may be billed per call.** `transactions_refresh` is a separate Plaid
+  product. It is off by default and should stay that way for routine syncs.
+- **The pull is asynchronous.** The refresh is a request, not a completed
+  transfer. Anything it finds may only show up on the next `ledger sync`.
+
+Use it when the answer depends on the last few hours — "did my paycheck land",
+"did that payment clear". For everything else, plain `sync` is correct and free.
 
 ## Development
 

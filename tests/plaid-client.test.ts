@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { LinkTokenCreateRequest } from 'plaid';
-import type { TransactionsRecurringGetResponse } from 'plaid';
+import type { TransactionsRecurringGetResponse, TransactionsRefreshResponse } from 'plaid';
 import {
   CONSENTED_PRODUCTS,
   PlaidApiError,
@@ -473,5 +473,55 @@ describe('getRecurringStreams', () => {
     );
 
     await expect(client.getRecurringStreams('access-tok')).rejects.toSatisfy(isConsentRequired);
+  });
+});
+
+describe('refreshTransactions', () => {
+  it('calls /transactions/refresh with the access token', async () => {
+    const seen: Array<{ access_token: string }> = [];
+    const client = clientWithStub(
+      {
+        transactionsRefresh: async (req: { access_token: string }) => {
+          seen.push(req);
+          return { data: { request_id: 'r' } as TransactionsRefreshResponse };
+        },
+      },
+      [],
+    );
+
+    await client.refreshTransactions('access-tok');
+
+    expect(seen).toEqual([{ access_token: 'access-tok' }]);
+  });
+
+  it('returns nothing — the endpoint yields no data, only a trigger', async () => {
+    const client = clientWithStub(
+      {
+        transactionsRefresh: async () => ({
+          data: { request_id: 'r' } as TransactionsRefreshResponse,
+        }),
+      },
+      [],
+    );
+
+    await expect(client.refreshTransactions('access-tok')).resolves.toBeUndefined();
+  });
+
+  it('propagates a reauth failure so the caller can classify it', async () => {
+    const client = clientWithStub(
+      {
+        transactionsRefresh: async () => {
+          throw wireError(400, {
+            error_code: 'ITEM_LOGIN_REQUIRED',
+            error_type: 'ITEM_ERROR',
+            error_message: 'login required',
+          });
+        },
+      },
+      [],
+    );
+
+    const error = await client.refreshTransactions('access-tok').catch((e: unknown) => e);
+    expect(isReauthRequired(error)).toBe(true);
   });
 });

@@ -1,5 +1,6 @@
 import type { LedgerConfig } from './config.js';
 import { listAccountRows, listItems, type AccountRow, type Db, type TransactionRow } from './db.js';
+import { assertDateOrder, resolveDate } from './dates.js';
 
 const STALE_MS = 24 * 3600 * 1000;
 
@@ -43,7 +44,16 @@ function txnWhere(f: TxnFilters): { where: string; params: Record<string, unknow
   if (f.accountId !== undefined) { clauses.push('account_id = @accountId'); params['accountId'] = f.accountId; }
   if (f.from !== undefined) { clauses.push('date >= @from'); params['from'] = f.from; }
   if (f.to !== undefined) { clauses.push('date <= @to'); params['to'] = f.to; }
-  if (f.category !== undefined) { clauses.push('category_primary = @category'); params['category'] = f.category; }
+  if (f.category !== undefined) {
+    // Case-insensitive, and NULL-aware: `category_primary = @category` can never
+    // match a NULL row, so UNCATEGORIZED needs its own IS NULL branch.
+    if (f.category.toUpperCase() === 'UNCATEGORIZED') {
+      clauses.push('category_primary IS NULL');
+    } else {
+      clauses.push('UPPER(category_primary) = UPPER(@category)');
+      params['category'] = f.category;
+    }
+  }
   if (f.status !== undefined) { clauses.push('status = @status'); params['status'] = f.status; }
   if (f.search !== undefined) {
     clauses.push("(description LIKE @search OR counterparty LIKE @search)");
@@ -57,7 +67,12 @@ export function listTransactions(
   f: TxnFilters = {},
   now: () => number = Date.now,
 ): { transactions: TransactionRow[]; total: number; meta: QueryMeta } {
-  const { where, params } = txnWhere(f);
+  const from = f.from !== undefined ? resolveDate(f.from, now) : undefined;
+  const to = f.to !== undefined ? resolveDate(f.to, now) : undefined;
+  if (from !== undefined && to !== undefined) assertDateOrder(from, to);
+  if (f.category !== undefined) assertKnownCategory(db, f.category);
+
+  const { where, params } = txnWhere({ ...f, from, to });
   const total = (
     db.prepare(`SELECT COUNT(*) AS n FROM transactions ${where}`).get(params) as { n: number }
   ).n;
@@ -96,13 +111,57 @@ const GROUP_EXPR: Record<SpendingGroupBy, string> = {
   account: 'account_id',
 };
 
+export interface CategoryCount {
+  category: string;
+  count: number;
+}
+
+/**
+ * The only source of truth for "what categories exist": Plaid's SDK types
+ * `personal_finance_category.primary` as a bare `string`, no enum, and ships no
+ * endpoint that enumerates the taxonomy. What's actually in the local cache is
+ * all there is to validate `--category` against or offer for discovery.
+ */
+function distinctCategoryCounts(db: Db): CategoryCount[] {
+  return db
+    .prepare(
+      `SELECT ${GROUP_EXPR['category']} AS category, COUNT(*) AS count
+       FROM transactions
+       GROUP BY category
+       ORDER BY count DESC`,
+    )
+    .all() as CategoryCount[];
+}
+
+export function listCategories(
+  db: Db,
+  now: () => number = Date.now,
+): { categories: CategoryCount[]; meta: QueryMeta } {
+  return { categories: distinctCategoryCounts(db), meta: metaFor(db, now) };
+}
+
+export function assertKnownCategory(db: Db, category: string): void {
+  const known = distinctCategoryCounts(db).map(c => c.category);
+  if (known.length === 0) return; // nothing synced yet — nothing to validate against
+  if (!known.some(c => c.toUpperCase() === category.toUpperCase())) {
+    throw new Error(
+      `category "${category}" is not known. Valid values: ${known.join(', ')}. ` +
+        'Run `ledger categories` (or the list_categories MCP tool) to see this list with counts.',
+    );
+  }
+}
+
 export function spendingSummary(
   db: Db,
   f: SpendingFilters,
   now: () => number = Date.now,
 ): { groups: SpendingGroup[]; grandTotalCents: number; meta: QueryMeta } {
+  const from = resolveDate(f.from, now);
+  const to = resolveDate(f.to, now);
+  assertDateOrder(from, to);
+
   const clauses = ['date >= @from', 'date <= @to'];
-  const params: Record<string, unknown> = { from: f.from, to: f.to };
+  const params: Record<string, unknown> = { from, to };
   if (f.accountId !== undefined) { clauses.push('account_id = @accountId'); params['accountId'] = f.accountId; }
   if (f.includePending !== true) clauses.push("status = 'posted'");
   // Spend = POSITIVE amounts under Plaid's sign convention, which is the inverse

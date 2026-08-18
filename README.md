@@ -81,10 +81,26 @@ ledger sync [--account|--item id] refresh from Plaid
 ledger accounts                   balances (local)
 ledger transactions [filters]     query (local)
 ledger spending --from --to       rollups (local)
+ledger categories                 known categories with counts (local)
 ```
 
 Every command takes `--json` except `init`, which is a conversation rather than a
 query. Reads report staleness (>24h since sync).
+
+### Dates and categories
+
+`--from`/`--to` (on `transactions` and `spending`) accept an absolute `yyyy-mm-dd`
+or a relative keyword: `today`, `yesterday`, `this-month`, `last-month`,
+`end-of-last-month`, `this-year`, or `<N>-days-ago` (e.g. `30-days-ago`). An
+invalid date, or `--from` after `--to`, is rejected with an error — it never
+silently produces an empty result.
+
+`--category` matches Plaid's primary personal-finance category
+case-insensitively (`food_and_drink` matches `FOOD_AND_DRINK`); use
+`UNCATEGORIZED` for transactions with no category. Plaid ships no fixed list of
+valid categories, so `ledger categories` is the source of truth for what
+actually exists in your data — an unknown value is rejected with the real list
+rather than silently returning nothing.
 
 `init --force` replaces an existing config and asks for confirmation first.
 Changing credentials invalidates the access tokens your linked banks were
@@ -178,9 +194,9 @@ and MCP cannot report different numbers.
 ## MCP
 
 Register `dist/mcp/index.js` as a stdio MCP server. Tools: `list_accounts`,
-`list_transactions`, `spending_summary`, `sync`, `auth_status`. Setup, linking,
-and repairing a bank are CLI-only — all three need a human at a terminal or a
-browser.
+`list_transactions`, `list_categories`, `spending_summary`, `sync`,
+`auth_status`. Setup, linking, and repairing a bank are CLI-only — all three
+need a human at a terminal or a browser.
 
 ## State
 

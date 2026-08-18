@@ -8,6 +8,7 @@ import { removeLinkedItem } from '../core/items.js';
 import {
   authStatus,
   listAccounts,
+  listCategories,
   listTransactions,
   spendingSummary,
   type SpendingGroupBy,
@@ -319,12 +320,32 @@ program
   );
 
 program
+  .command('categories')
+  .description('list known categories with transaction counts (from local db)')
+  .action(
+    withCtx(program, ({ db, json }) => {
+      const result = listCategories(db);
+      if (json) {
+        process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+        return;
+      }
+      process.stdout.write(
+        formatTable(result.categories.map(c => ({ category: c.category, count: c.count }))) +
+          `\n${result.meta.stale ? 'STALE — run `ledger sync`' : 'fresh'}\n`,
+      );
+    }),
+  );
+
+program
   .command('transactions')
   .description('query transactions (from local db; positive amounts are money out)')
   .option('--account <id>')
-  .option('--from <date>')
-  .option('--to <date>')
-  .option('--category <name>', 'Plaid primary category, e.g. FOOD_AND_DRINK')
+  .option('--from <date>', 'yyyy-mm-dd or relative: today, yesterday, this-month, last-month, N-days-ago')
+  .option('--to <date>', 'yyyy-mm-dd or relative: today, yesterday, this-month, last-month, N-days-ago')
+  .option(
+    '--category <name>',
+    "Plaid primary category, e.g. FOOD_AND_DRINK (case-insensitive; 'UNCATEGORIZED' for uncategorized transactions; run `ledger categories` to see valid values)",
+  )
   .option('--search <text>')
   .option('--status <status>', 'posted|pending')
   .option('--limit <n>', 'default 100')
@@ -377,8 +398,14 @@ program
 program
   .command('spending')
   .description('spending rollup (from local db; totals are positive dollars)')
-  .requiredOption('--from <date>')
-  .requiredOption('--to <date>')
+  .requiredOption(
+    '--from <date>',
+    'yyyy-mm-dd or relative: today, yesterday, this-month, last-month, N-days-ago',
+  )
+  .requiredOption(
+    '--to <date>',
+    'yyyy-mm-dd or relative: today, yesterday, this-month, last-month, N-days-ago',
+  )
   .option('--by <group>', 'category|merchant|month|account', 'category')
   .option('--account <id>')
   .option('--include-pending', 'count transactions that have not settled yet')

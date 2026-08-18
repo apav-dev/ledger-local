@@ -2,7 +2,13 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { LedgerConfig } from '../core/config.js';
 import type { Db } from '../core/db.js';
-import { authStatus, listAccounts, listTransactions, spendingSummary } from '../core/queries.js';
+import {
+  authStatus,
+  listAccounts,
+  listCategories,
+  listTransactions,
+  spendingSummary,
+} from '../core/queries.js';
 import { isReauthRequired, type LedgerPlaidApi } from '../core/plaid-client.js';
 import { syncAll } from '../core/sync.js';
 // Money is stored as integer cents. Every tool result goes through a view so the
@@ -76,17 +82,24 @@ export function buildMcpServer(deps: Deps): McpServer {
         'spending would be wrong. To total spending, sum only positive amounts; to total income, ' +
         'sum negative amounts and negate the result. Prefer the spending_summary tool for totals, ' +
         'which handles this for you. ' +
-        'Dates are yyyy-mm-dd. category filters on Plaid\'s primary personal-finance category ' +
-        '(SCREAMING_SNAKE_CASE, e.g. FOOD_AND_DRINK). Returns the total match count alongside ' +
-        'the paginated rows.',
+        'Dates accept yyyy-mm-dd or a relative keyword: today, yesterday, this-month, last-month, ' +
+        'end-of-last-month, this-year, or <N>-days-ago (e.g. 30-days-ago) — an invalid date throws ' +
+        'rather than silently returning nothing. category matches Plaid\'s primary personal-finance ' +
+        'category case-insensitively (e.g. food_and_drink matches FOOD_AND_DRINK); use ' +
+        '\'UNCATEGORIZED\' for transactions with no category. An unknown category throws, listing ' +
+        'the valid values — call list_categories first if unsure what exists. Returns the total ' +
+        'match count alongside the paginated rows.',
       inputSchema: {
         accountId: z.string().optional(),
-        from: z.string().optional().describe('inclusive start date yyyy-mm-dd'),
-        to: z.string().optional().describe('inclusive end date yyyy-mm-dd'),
+        from: z.string().optional().describe('inclusive start date: yyyy-mm-dd or a relative keyword'),
+        to: z.string().optional().describe('inclusive end date: yyyy-mm-dd or a relative keyword'),
         category: z
           .string()
           .optional()
-          .describe('Plaid primary category, e.g. FOOD_AND_DRINK or GENERAL_MERCHANDISE'),
+          .describe(
+            "Plaid primary category, case-insensitive, e.g. FOOD_AND_DRINK or GENERAL_MERCHANDISE. " +
+              "'UNCATEGORIZED' matches transactions with no category. See list_categories for valid values.",
+          ),
         search: z.string().optional().describe('substring match on description/merchant'),
         status: z.enum(['posted', 'pending']).optional(),
         limit: z.number().int().positive().max(1000).optional().describe('default 100'),
@@ -103,6 +116,25 @@ export function buildMcpServer(deps: Deps): McpServer {
   );
 
   server.registerTool(
+    'list_categories',
+    {
+      description:
+        'List every category value present in the local cache, with transaction counts. ' +
+        'Call this before filtering list_transactions or list_transactions fails with an ' +
+        '"unknown category" error — Plaid ships no fixed category list, so this local cache is ' +
+        'the only source of truth for what values are valid right now.',
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        return ok(listCategories(deps.db));
+      } catch (error) {
+        return err(error);
+      }
+    },
+  );
+
+  server.registerTool(
     'spending_summary',
     {
       description:
@@ -110,10 +142,13 @@ export function buildMcpServer(deps: Deps): McpServer {
         'Totals are POSITIVE dollar amounts in every case, so no sign reasoning is needed here. ' +
         'By default only real spending is counted: pending transactions and money coming in are ' +
         'both excluded. Set includeInflows to also count deposits and refunds, and includePending ' +
-        'to count not-yet-settled transactions.',
+        'to count not-yet-settled transactions. ' +
+        'from/to accept yyyy-mm-dd or a relative keyword: today, yesterday, this-month, last-month, ' +
+        'end-of-last-month, this-year, or <N>-days-ago (e.g. 30-days-ago) — an invalid date or an ' +
+        'inverted range (from after to) throws rather than silently returning an empty result.',
       inputSchema: {
-        from: z.string().describe('inclusive start date yyyy-mm-dd'),
-        to: z.string().describe('inclusive end date yyyy-mm-dd'),
+        from: z.string().describe('inclusive start date: yyyy-mm-dd or a relative keyword'),
+        to: z.string().describe('inclusive end date: yyyy-mm-dd or a relative keyword'),
         groupBy: z.enum(['category', 'merchant', 'month', 'account']),
         accountId: z.string().optional(),
         includePending: z.boolean().optional(),

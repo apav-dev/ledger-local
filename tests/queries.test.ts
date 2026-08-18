@@ -3,6 +3,7 @@ import { setAccountSynced, setItemCursor, upsertItem } from '../src/core/db.js';
 import {
   authStatus,
   listAccounts,
+  listCategories,
   listTransactions,
   spendingSummary,
   unsyncedItemIds,
@@ -62,6 +63,73 @@ describe('listTransactions', () => {
     const db = seedDb();
     const income = listTransactions(db, { category: 'INCOME' }, () => NOW);
     expect(income.transactions[0]?.amount_cents).toBe(-200_000);
+  });
+
+  it('matches category case-insensitively', () => {
+    const db = seedDb();
+    const groceries = listTransactions(db, { category: 'groceries' }, () => NOW);
+    expect(groceries.transactions.map(t => t.id).sort()).toEqual(['t1', 't2']);
+  });
+
+  it('rejects an unknown category, listing the real ones', () => {
+    const db = seedDb();
+    expect(() => listTransactions(db, { category: 'NOT_REAL' }, () => NOW)).toThrow(/is not known/);
+    expect(() => listTransactions(db, { category: 'NOT_REAL' }, () => NOW)).toThrow(/GROCERIES/);
+  });
+
+  it('filters UNCATEGORIZED to rows with no category', () => {
+    const db = seedDb();
+    db.prepare('UPDATE transactions SET category_primary = NULL WHERE id = ?').run('t1');
+    const result = listTransactions(db, { category: 'uncategorized' }, () => NOW);
+    expect(result.transactions.map(t => t.id)).toEqual(['t1']);
+  });
+
+  it('rejects a garbage date instead of silently returning empty', () => {
+    const db = seedDb();
+    expect(() => listTransactions(db, { from: '2026-13-45' }, () => NOW)).toThrow(/not a valid date/);
+    expect(() => listTransactions(db, { to: 'last month' }, () => NOW)).toThrow(/not a valid date/);
+  });
+
+  it('rejects an inverted date range', () => {
+    const db = seedDb();
+    expect(() =>
+      listTransactions(db, { from: '2026-08-31', to: '2026-08-01' }, () => NOW),
+    ).toThrow(/must not be after/);
+  });
+
+  it('resolves relative date keywords', () => {
+    const db = seedDb();
+    // NOW = 2026-08-17, so this-month starts 2026-08-01, matching the August rows.
+    const result = listTransactions(db, { from: 'this-month', to: 'today' }, () => NOW);
+    expect(result.total).toBe(5);
+  });
+});
+
+describe('listCategories', () => {
+  it('returns distinct categories with counts', () => {
+    const db = seedDb();
+    const { categories } = listCategories(db, () => NOW);
+    expect(categories.map(c => c.category).sort()).toEqual([
+      'FOOD_AND_DRINK',
+      'GROCERIES',
+      'INCOME',
+      'TRAVEL',
+    ]);
+    expect(categories.find(c => c.category === 'GROCERIES')).toMatchObject({ count: 2 });
+  });
+
+  it('includes UNCATEGORIZED for null-category rows', () => {
+    const db = seedDb();
+    db.prepare('UPDATE transactions SET category_primary = NULL WHERE id = ?').run('t1');
+    const { categories } = listCategories(db, () => NOW);
+    expect(categories.find(c => c.category === 'UNCATEGORIZED')).toMatchObject({ count: 1 });
+  });
+
+  it('returns empty with fresh meta on an empty database', () => {
+    const db = seedDb();
+    db.prepare('DELETE FROM transactions').run();
+    const { categories } = listCategories(db, () => NOW);
+    expect(categories).toEqual([]);
   });
 });
 
@@ -158,6 +226,35 @@ describe('spendingSummary', () => {
     );
     expect(groups).toEqual([]);
     expect(grandTotalCents).toBe(0);
+  });
+
+  it('rejects a garbage date instead of silently returning a zero total', () => {
+    const db = seedDb();
+    expect(() =>
+      spendingSummary(db, { from: '2026-13-45', to: 'today', groupBy: 'category' }, () => NOW),
+    ).toThrow(/not a valid date/);
+    expect(() =>
+      spendingSummary(db, { from: 'last month', to: 'today', groupBy: 'category' }, () => NOW),
+    ).toThrow(/not a valid date/);
+  });
+
+  it('rejects an inverted date range instead of silently returning a zero total', () => {
+    const db = seedDb();
+    expect(() =>
+      spendingSummary(db, { from: '2026-08-31', to: '2026-08-01', groupBy: 'category' }, () => NOW),
+    ).toThrow(/must not be after/);
+  });
+
+  it('resolves relative date keywords', () => {
+    const db = seedDb();
+    // NOW = 2026-08-17. this-month..today covers 2026-08-01..2026-08-17: posted,
+    // non-inflow rows t1 ($50), t2 ($30), t6 ($40) — t4 is an inflow, t5 is pending.
+    const { grandTotalCents } = spendingSummary(
+      db,
+      { from: 'this-month', to: 'today', groupBy: 'category' },
+      () => NOW,
+    );
+    expect(grandTotalCents).toBe(12_000);
   });
 });
 

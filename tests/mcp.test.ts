@@ -50,12 +50,13 @@ function textOf(result: unknown): unknown {
 }
 
 describe('mcp server', () => {
-  it('exposes the five tools', async () => {
+  it('exposes the six tools', async () => {
     const client = await connect();
     const { tools } = await client.listTools();
     expect(tools.map(t => t.name).sort()).toEqual([
       'auth_status',
       'list_accounts',
+      'list_categories',
       'list_transactions',
       'spending_summary',
       'sync',
@@ -212,5 +213,85 @@ describe('mcp server', () => {
     const { tools } = await client.listTools();
     const description = tools.find(t => t.name === 'sync')?.description ?? '';
     expect(description).toMatch(/whole bank connection/);
+  });
+
+  describe('list_categories', () => {
+    it('returns known categories with counts', async () => {
+      const client = await connect();
+      const data = textOf(await client.callTool({ name: 'list_categories', arguments: {} })) as {
+        categories: Array<{ category: string; count: number }>;
+        meta: { stale: boolean };
+      };
+      expect(data.categories.map(c => c.category).sort()).toEqual([
+        'FOOD_AND_DRINK',
+        'GROCERIES',
+        'INCOME',
+        'TRAVEL',
+      ]);
+      expect(data.categories.find(c => c.category === 'GROCERIES')?.count).toBe(2);
+    });
+  });
+
+  describe('date and category validation', () => {
+    it('rejects a garbage date on list_transactions instead of returning empty', async () => {
+      const client = await connect();
+      const result = await client.callTool({
+        name: 'list_transactions',
+        arguments: { from: '2026-13-45' },
+      });
+      expect(result.isError).toBe(true);
+      expect(rawText(result)).toMatch(/not a valid date/);
+    });
+
+    it('rejects a garbage date on spending_summary instead of returning a zero total', async () => {
+      const client = await connect();
+      const result = await client.callTool({
+        name: 'spending_summary',
+        arguments: { from: 'last month', to: 'today', groupBy: 'category' },
+      });
+      expect(result.isError).toBe(true);
+      expect(rawText(result)).toMatch(/not a valid date/);
+    });
+
+    it('rejects an inverted date range', async () => {
+      const client = await connect();
+      const result = await client.callTool({
+        name: 'spending_summary',
+        arguments: { from: '2026-08-31', to: '2026-08-01', groupBy: 'category' },
+      });
+      expect(result.isError).toBe(true);
+      expect(rawText(result)).toMatch(/must not be after/);
+    });
+
+    it('resolves a relative date keyword end-to-end', async () => {
+      const client = await connect();
+      const result = await client.callTool({
+        name: 'spending_summary',
+        arguments: { from: 'this-month', to: 'today', groupBy: 'category' },
+      });
+      expect(result.isError).toBeUndefined();
+    });
+
+    it('matches category case-insensitively', async () => {
+      const client = await connect();
+      const result = await client.callTool({
+        name: 'list_transactions',
+        arguments: { category: 'groceries' },
+      });
+      const data = textOf(result) as { transactions: Array<{ id: string }> };
+      expect(data.transactions.map(t => t.id).sort()).toEqual(['t1', 't2']);
+    });
+
+    it('rejects an unknown category, listing the real ones', async () => {
+      const client = await connect();
+      const result = await client.callTool({
+        name: 'list_transactions',
+        arguments: { category: 'not_a_real_category' },
+      });
+      expect(result.isError).toBe(true);
+      const text = rawText(result);
+      expect(text).toMatch(/is not known/);
+      expect(text).toContain('GROCERIES');
+    });
   });
 });

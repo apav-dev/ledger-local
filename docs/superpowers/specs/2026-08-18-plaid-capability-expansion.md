@@ -47,7 +47,7 @@ on 2026-08-18. They constrain the design; do not re-derive them from memory.
 
 From `plaid@45` `Transaction`: `authorized_date`, `authorized_datetime`,
 `datetime`, `original_description`, `iso_currency_code`,
-`unofficial_currency_code`, `merchant_entity_id`, `merchant_category_code`,
+`unofficial_currency_code`, `merchant_entity_id`,
 `counterparties[]` (typed: `merchant` / `financial_institution` /
 `payment_app` / `marketplace` / `payment_terminal` / `income_source`),
 `payment_channel`, `transaction_code`, `location`, `payment_meta`, `website`,
@@ -99,7 +99,7 @@ it, and the re-pull is only free while nothing is linked. Storage is not the
 constraint — a null column costs about a byte in SQLite's record format, and
 this is one person's ledger.
 
-Schema v3 adds 34 columns to `transactions`:
+Schema v3 adds 33 columns to `transactions`:
 
 | Group | Columns | Source |
 |---|---|---|
@@ -107,7 +107,7 @@ Schema v3 adds 34 columns to `transactions`:
 | Description | `original_description` | same name |
 | Currency | `iso_currency_code`, `unofficial_currency_code` | stored separately, not coalesced |
 | Category | `category_confidence`, `category_icon_url` | `personal_finance_category.confidence_level`, `personal_finance_category_icon_url` |
-| Merchant | `merchant_entity_id`, `merchant_category_code`, `website`, `logo_url` | same names |
+| Merchant | `merchant_entity_id`, `website`, `logo_url` | same names |
 | Counterparty | `counterparty_type`, `counterparties_json` | `counterparties[0].type`, plus the whole array verbatim |
 | Channel | `payment_channel`, `transaction_code` | same names |
 | Instrument | `check_number`, `account_owner` | same names |
@@ -126,13 +126,17 @@ Excluded, with reasons that are not "low value":
   permanently null. `personal_finance_category` supersedes all three.
 - `personal_finance_category.version` — describes the taxonomy revision, not
   the transaction.
+- `merchant_category_code` — **not on `Transaction` in `plaid@45`.** Plaid's docs
+  page lists it, but the SDK declares it only on `Credit1099`, an unrelated
+  product. Caught by `tsc` during execution. If Plaid ever adds it to
+  `Transaction`, it is one column away.
 
 The existing `type` column holds `payment_channel` under a misleading name.
 v3 drops it and declares `payment_channel` properly.
 
 #### The real cost of storing everything, and how it is paid
 
-Storage is free here. **Agent context is not.** A 44-column transaction row
+Storage is free here. **Agent context is not.** A 43-column transaction row
 serialised into an MCP tool result, times a hundred rows, is a large payload
 that is mostly nulls — and it competes with the reasoning budget of the model
 consuming it.

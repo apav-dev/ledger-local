@@ -6,7 +6,7 @@
 
 **Architecture:** No migration code. `src/core/db.ts` states that migrations do not exist because the tool has never shipped and deleting the database is free — a premise that still holds and that this plan is racing to stay ahead of. Every schema change is a plain edit to `SCHEMA` plus a `SCHEMA_VERSION` bump; a stale sandbox database is rejected loudly and deleted. Then `toTransactionRow`, `TransactionView`, and the query layer widen to carry the new fields.
 
-Storage keeps everything; the MCP boundary does not. A 44-column row times a hundred transactions is a payload that is mostly nulls and competes with the model's reasoning budget, so `list_transactions` projects a lean subset by default and returns the full row on `verbose: true`. CLI `--json` always emits everything.
+Storage keeps everything; the MCP boundary does not. A 43-column row times a hundred transactions is a payload that is mostly nulls and competes with the model's reasoning budget, so `list_transactions` projects a lean subset by default and returns the full row on `verbose: true`. CLI `--json` always emits everything.
 
 **Tech Stack:** TypeScript 7 (strict), better-sqlite3 12, plaid 45, vitest 4, commander 15.
 
@@ -68,7 +68,7 @@ knows the policy has a shelf life rather than discovering it the hard way.
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
-- Produces: `TransactionRow` with 34 added members, and with `type: string` **removed**. Tasks 2–5 depend on this exact shape:
+- Produces: `TransactionRow` with 33 added members, and with `type: string` **removed**. Tasks 2–5 depend on this exact shape:
   ```ts
   authorized_date: string | null;
   authorized_datetime: string | null;
@@ -79,7 +79,6 @@ knows the policy has a shelf life rather than discovering it the hard way.
   category_confidence: string | null;
   category_icon_url: string | null;
   merchant_entity_id: string | null;
-  merchant_category_code: string | null;
   website: string | null;
   logo_url: string | null;
   counterparty_type: string | null;
@@ -127,7 +126,7 @@ describe('schema v3', () => {
     iso_currency_code: 'USD', unofficial_currency_code: 'BTC',
     category_confidence: 'VERY_HIGH',
     category_icon_url: 'https://plaid-category-icons.plaid.com/FOOD_AND_DRINK.png',
-    merchant_entity_id: 'ent_bb', merchant_category_code: '5814',
+    merchant_entity_id: 'ent_bb',
     website: 'bluebottlecoffee.com',
     logo_url: 'https://plaid-merchant-logos.plaid.com/blue_bottle.png',
     counterparty_type: 'merchant',
@@ -261,7 +260,6 @@ CREATE TABLE IF NOT EXISTS transactions (
   category_confidence            TEXT,
   category_icon_url              TEXT,
   merchant_entity_id             TEXT,
-  merchant_category_code         TEXT,
   website                        TEXT,
   logo_url                       TEXT,
   counterparty_type              TEXT,
@@ -388,8 +386,6 @@ In the `TransactionRow` interface, delete the `type: string;` member and its com
   category_icon_url: string | null;
   /** Stable merchant id across name variants. Group on this, display the name. */
   merchant_entity_id: string | null;
-  /** ISO 18245 MCC. Coarser than Plaid's category but institution-reported. */
-  merchant_category_code: string | null;
   website: string | null;
   logo_url: string | null;
   /**
@@ -434,7 +430,7 @@ In the `TransactionRow` interface, delete the `type: string;` member and its com
   payment_meta_reason: string | null;
 ```
 
-Then replace the hand-written `INSERT` in `upsertTransactions` with SQL derived from a column list. At 44 columns a literal statement means 44 names, 44 placeholders, and 42 `ON CONFLICT` assignments kept in sync by hand — a column silently dropped from any one of the three is the exact bug that survives review.
+Then replace the hand-written `INSERT` in `upsertTransactions` with SQL derived from a column list. At 43 columns a literal statement means 44 names, 44 placeholders, and 42 `ON CONFLICT` assignments kept in sync by hand — a column silently dropped from any one of the three is the exact bug that survives review.
 
 Add above `upsertTransactions`:
 
@@ -450,7 +446,7 @@ const TXN_COLUMNS = [
   'pending_transaction_id', 'authorized_date', 'authorized_datetime', 'datetime',
   'original_description', 'iso_currency_code', 'unofficial_currency_code',
   'category_confidence', 'category_icon_url', 'merchant_entity_id',
-  'merchant_category_code', 'website', 'logo_url', 'counterparty_type',
+  'website', 'logo_url', 'counterparty_type',
   'counterparties_json', 'payment_channel', 'transaction_code', 'check_number',
   'account_owner', 'location_address', 'location_city', 'location_region',
   'location_postal_code', 'location_country', 'location_lat', 'location_lon',
@@ -531,7 +527,7 @@ with the new channel column and the 33 fields that now exist:
     original_description: null,
     iso_currency_code: 'USD', unofficial_currency_code: null,
     category_confidence: null, category_icon_url: null,
-    merchant_entity_id: null, merchant_category_code: null,
+    merchant_entity_id: null,
     website: null, logo_url: null,
     counterparty_type: null, counterparties_json: null,
     transaction_code: null, check_number: null, account_owner: null,
@@ -789,7 +785,6 @@ export function toTransactionRow(t: Transaction): TransactionRow {
     counterparties_json:
       t.counterparties === undefined ? null : JSON.stringify(t.counterparties),
     merchant_entity_id: t.merchant_entity_id ?? null,
-    merchant_category_code: t.merchant_category_code ?? null,
     website: t.website ?? null,
     logo_url: t.logo_url ?? null,
     payment_channel: t.payment_channel,
@@ -866,7 +861,7 @@ git commit -m "feat(sync): map authorized_date, confidence, merchant entity, cha
 
 `views.ts` lists every field explicitly rather than spreading, so the full view exists precisely because Task 1 broke compilation here. That is the design working.
 
-**Why a second view.** Storage keeps everything; a tool result should not. Forty-four fields times a hundred rows is a payload that is mostly nulls, and it spends the model's context on `payment_meta_by_order_of: null` instead of on reasoning. The lean set is the fifteen fields an agent actually reasons with. Nothing is hidden — `verbose: true` returns the full row, and the CLI never truncates at all.
+**Why a second view.** Storage keeps everything; a tool result should not. Forty-three fields times a hundred rows is a payload that is mostly nulls, and it spends the model's context on `payment_meta_by_order_of: null` instead of on reasoning. The lean set is the fifteen fields an agent actually reasons with. Nothing is hidden — `verbose: true` returns the full row, and the CLI never truncates at all.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -956,7 +951,7 @@ export function transactionView(row: TransactionRow): TransactionView {
 ```
 
 This is the one place the explicit-field-listing convention is dropped, and
-deliberately. At 44 fields the list stopped catching mistakes and started
+deliberately. At 43 fields the list stopped catching mistakes and started
 causing them: the `Omit`-derived type already makes a dropped field a
 compile error, and destructuring `amount_cents` out by name means the
 conversion cannot be skipped. Listing 43 identity assignments underneath would
@@ -971,7 +966,7 @@ Append to `src/core/views.ts`:
  * The subset of a transaction an agent reasons with.
  *
  * Storage keeps every field Plaid sends, because re-fetching is only free until
- * a bank is linked. A tool result is a different problem: forty-four fields
+ * a bank is linked. A tool result is a different problem: forty-three fields
  * times a hundred rows is mostly nulls, and every null spends context the model
  * needs for the actual question. Nothing here is hidden — callers that want the
  * whole row ask for it.
@@ -1056,7 +1051,7 @@ Expected: PASS for views. `typecheck` still fails in `queries.ts` and `helpers.t
 git add src/core/views.ts tests/views.test.ts tests/helpers.ts tests/db.test.ts
 git commit -m "feat(views): full transaction view plus a lean projection for agents
 
-Storage keeps every field; MCP results do not. Forty-four mostly-null
+Storage keeps every field; MCP results do not. Forty-three mostly-null
 fields per row spends model context on nothing. verbose:true returns
 the full row and the CLI never truncates."
 ```
@@ -1090,7 +1085,7 @@ Replace the `const t = ...` helper and the `upsertTransactions` call in `tests/h
     original_description: null,
     iso_currency_code: 'USD', unofficial_currency_code: null,
     category_confidence: null, category_icon_url: null,
-    merchant_entity_id: null, merchant_category_code: null,
+    merchant_entity_id: null,
     website: null, logo_url: null,
     counterparty_type: null, counterparties_json: null,
     payment_channel: 'in store', transaction_code: null,
@@ -1430,13 +1425,13 @@ git commit -m "feat(queries): group merchants by entity id, add payment_channel,
 
 ## Self-Review
 
-**Spec coverage.** Feature 1 asks for every `/transactions/sync` field stored — 34 columns (Task 1), mapped at ingest (Task 2), exposed at the output boundary (Task 3) — plus the corrected version-0 error message and the recorded policy expiry (Task 1 Steps 4–5), the CLI/MCP projection split (Task 3 Steps 4–5, Task 5 Steps 7–8), and merchant grouping by entity id, `payment_channel` grouping, and search over `original_description` (Task 5). Task 4 exists only to keep the shared seed compiling between Tasks 1 and 5. Success criteria 1 and 2 are the last two cases in Task 1 Step 1; criterion 3 is the first case in Task 5 Step 1; criterion 7 is a step in every task.
+**Spec coverage.** Feature 1 asks for every `/transactions/sync` field stored — 33 columns (Task 1), mapped at ingest (Task 2), exposed at the output boundary (Task 3) — plus the corrected version-0 error message and the recorded policy expiry (Task 1 Steps 4–5), the CLI/MCP projection split (Task 3 Steps 4–5, Task 5 Steps 7–8), and merchant grouping by entity id, `payment_channel` grouping, and search over `original_description` (Task 5). Task 4 exists only to keep the shared seed compiling between Tasks 1 and 5. Success criteria 1 and 2 are the last two cases in Task 1 Step 1; criterion 3 is the first case in Task 5 Step 1; criterion 7 is a step in every task.
 
 **Placeholders.** None. Every code step carries the literal text to write, except Task 4 Step 1's `fullTransactionRow`, which names the Task 1 literal it moves rather than reprinting 44 lines — the point of the move is that only one copy exists.
 
 **Type consistency.** `TransactionRow` is defined once in Task 1 and consumed unchanged by Tasks 2, 3, and 4. `TXN_COLUMNS` and `TransactionRow` are held in agreement by the `ColumnsMatchRow` guard, which was verified to error in both drift directions and to name the offending field. `payment_channel` is `string` in the row type and `TEXT NOT NULL` in the column, which agree because there is no `ALTER TABLE` forcing a nullable compromise. `LeanTransactionView` is a `Pick` of `TransactionView`, so a renamed field breaks compilation rather than silently vanishing from tool output. `SpendingGroupBy` gains `payment_channel` in Task 5, and both `GROUP_EXPR` and `KEY_EXPR` are `Record<SpendingGroupBy, string>`, so a missing arm fails compilation.
 
-**Two conventions deliberately broken, in opposite directions.** `transactionView` spreads instead of listing fields — at 44 fields the list stopped catching mistakes and started causing them, and the `Omit` type already enforces completeness. `leanTransactionView` lists every field explicitly, because it is an editorial choice about what an agent sees and must not widen automatically when a column is added.
+**Two conventions deliberately broken, in opposite directions.** `transactionView` spreads instead of listing fields — at 43 fields the list stopped catching mistakes and started causing them, and the `Omit` type already enforces completeness. `leanTransactionView` lists every field explicitly, because it is an editorial choice about what an agent sees and must not widen automatically when a column is added.
 
 **What changed across drafts.** The first version opened with an additive migration runner, on the reasoning that widening a table costs Item slots. True only after a production bank is linked, and none is — `src/core/db.ts` had already made that call, and building one anyway was speculative infrastructure for a database with no users. The second version stored ten curated fields; that was overruled in favour of storing everything, which is the right call for data that is only free to re-fetch until the first link. The surviving idea from both rounds is the pair of things that were actually load-bearing: the policy's expiry is now written down, and the error message that falsely promised no data loss is fixed.
 

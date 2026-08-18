@@ -145,8 +145,25 @@ describe('schema v3', () => {
     ...over,
   });
 
+  // NOT seedDb(): that fixture inserts transactions, and Task 4 is what widens
+  // them. Task 1 must stand alone, so it builds the minimum a transaction needs
+  // — one item, one account for the foreign key — and nothing else.
+  function dbWithAccount(): Db {
+    const db = openDb(':memory:', 'sandbox');
+    upsertItem(db, {
+      id: 'item_1', access_token: 'tok', institution: 'Chase',
+      institution_id: 'ins_56', created_at: 1,
+    });
+    upsertAccount(db, {
+      id: 'acc_1', item_id: 'item_1', name: 'Checking', official_name: null,
+      institution: 'Chase', type: 'depository', subtype: 'checking', mask: '1111',
+      iso_currency_code: 'USD', available_balance_cents: 0, current_balance_cents: 0,
+    });
+    return db;
+  }
+
   it('round-trips every column a TransactionRow declares', () => {
-    const db = seedDb();
+    const db = dbWithAccount();
     const row = fullRow({ id: 't_full' });
 
     upsertTransactions(db, [row]);
@@ -158,7 +175,7 @@ describe('schema v3', () => {
   });
 
   it('updates every column on conflict', () => {
-    const db = seedDb();
+    const db = dbWithAccount();
     upsertTransactions(db, [fullRow({ id: 't_up' })]);
 
     // Every mutable column changes value. A column left out of the ON CONFLICT
@@ -176,7 +193,7 @@ describe('schema v3', () => {
   });
 
   it('has no `type` column — payment_channel replaced it', () => {
-    const db = seedDb();
+    const db = dbWithAccount();
 
     const columns = (db.pragma('table_info(transactions)') as Array<{ name: string }>)
       .map(c => c.name);
@@ -496,10 +513,57 @@ rm -f ~/.local/share/ledger/ledger.db*
 If `LEDGER_DATA_DIR` is set, delete the database there instead. This is free
 right now and will not be after the first production link.
 
+- [ ] **Step 7b: Update the pre-existing tests in `tests/db.test.ts`**
+
+Task 1 owns this file, so leaving it red is not "done". Two mechanical breakages, both caused by the schema change:
+
+The file's own `txn()` helper (around line 59) still sets `type`. Replace that single line:
+
+```ts
+    type: 'in store',
+```
+
+with the new channel column and the 33 fields that now exist:
+
+```ts
+    payment_channel: 'in store',
+    authorized_date: null, authorized_datetime: null, datetime: null,
+    original_description: null,
+    iso_currency_code: 'USD', unofficial_currency_code: null,
+    category_confidence: null, category_icon_url: null,
+    merchant_entity_id: null, merchant_category_code: null,
+    website: null, logo_url: null,
+    counterparty_type: null, counterparties_json: null,
+    transaction_code: null, check_number: null, account_owner: null,
+    location_address: null, location_city: null, location_region: null,
+    location_postal_code: null, location_country: null,
+    location_lat: null, location_lon: null, location_store_number: null,
+    payment_meta_reference_number: null, payment_meta_ppd_id: null,
+    payment_meta_payee: null, payment_meta_by_order_of: null,
+    payment_meta_payer: null, payment_meta_payment_method: null,
+    payment_meta_payment_processor: null, payment_meta_reason: null,
+```
+
+And the version assertion (around line 316) still expects the old number:
+
+```ts
+    expect(db.pragma('user_version', { simple: true })).toBe(2);
+```
+
+becomes:
+
+```ts
+    expect(db.pragma('user_version', { simple: true })).toBe(3);
+```
+
+Leave the two error-message assertions alone. The v0 test matches
+`/older build with an incompatible schema/`, which the rewritten message in
+Step 5 still contains, and the newer-build test is unaffected.
+
 - [ ] **Step 8: Run the tests**
 
-Run: `pnpm vitest run tests/db.test.ts -t "schema v3"`
-Expected: PASS, all four cases.
+Run: `pnpm vitest run tests/db.test.ts`
+Expected: PASS — the whole file, not just the four new cases. `tests/db.test.ts` is Task 1's file and must be fully green before moving on.
 
 - [ ] **Step 9: Run the whole suite**
 

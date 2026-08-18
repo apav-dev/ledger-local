@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // rootDir is irrelevant under noEmit, but the base sets it to src, which
+    // would reject tests/ as outside the program.
+    "rootDir": ".",
+    "types": ["node"]
+  },
+  "include": ["src", "tests"]
+}

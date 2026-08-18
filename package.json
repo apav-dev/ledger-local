@@ -8,12 +8,12 @@
   },
   "packageManager": "pnpm@9.15.0",
   "bin": {
-    "teller": "dist/cli/index.js",
-    "teller-mcp": "dist/mcp/index.js"
+    "ledger": "dist/cli/index.js",
+    "ledger-mcp": "dist/mcp/index.js"
   },
   "scripts": {
     "build": "tsc",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
     "test": "vitest run",
     "cli": "tsx src/cli/index.ts",
     "mcp": "tsx src/mcp/index.ts"
@@ -22,7 +22,7 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "better-sqlite3": "^12.11.1",
     "commander": "^15.0.0",
-    "undici": "^8.7.0",
+    "plaid": "^45.0.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {

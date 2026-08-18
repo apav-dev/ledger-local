@@ -1,5 +1,14 @@
-import { certsPresent, type TellerConfig } from './config.js';
-import { listAccountRows, type AccountRow, type Db, type TransactionRow } from './db.js';
+import type { LedgerConfig } from './config.js';
+import {
+  itemConsent,
+  listAccountRows,
+  listItems,
+  type AccountRow,
+  type Db,
+  type TransactionRow,
+} from './db.js';
+import { assertDateOrder, resolveDate } from './dates.js';
+import { CONSENTED_PRODUCTS } from './plaid-client.js';
 
 const STALE_MS = 24 * 3600 * 1000;
 
@@ -43,10 +52,24 @@ function txnWhere(f: TxnFilters): { where: string; params: Record<string, unknow
   if (f.accountId !== undefined) { clauses.push('account_id = @accountId'); params['accountId'] = f.accountId; }
   if (f.from !== undefined) { clauses.push('date >= @from'); params['from'] = f.from; }
   if (f.to !== undefined) { clauses.push('date <= @to'); params['to'] = f.to; }
-  if (f.category !== undefined) { clauses.push('category = @category'); params['category'] = f.category; }
+  if (f.category !== undefined) {
+    // Case-insensitive, and NULL-aware: `category_primary = @category` can never
+    // match a NULL row, so UNCATEGORIZED needs its own IS NULL branch.
+    if (f.category.toUpperCase() === 'UNCATEGORIZED') {
+      clauses.push('category_primary IS NULL');
+    } else {
+      clauses.push('UPPER(category_primary) = UPPER(@category)');
+      params['category'] = f.category;
+    }
+  }
   if (f.status !== undefined) { clauses.push('status = @status'); params['status'] = f.status; }
   if (f.search !== undefined) {
-    clauses.push("(description LIKE @search OR counterparty LIKE @search)");
+    // original_description is the raw bank memo. It carries store numbers and
+    // reference codes that Plaid strips from `description`, which is exactly
+    // what someone pasting a line off a statement will search for.
+    clauses.push(
+      '(description LIKE @search OR counterparty LIKE @search OR original_description LIKE @search)',
+    );
     params['search'] = `%${f.search}%`;
   }
   return { where: clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '', params };
@@ -57,7 +80,12 @@ export function listTransactions(
   f: TxnFilters = {},
   now: () => number = Date.now,
 ): { transactions: TransactionRow[]; total: number; meta: QueryMeta } {
-  const { where, params } = txnWhere(f);
+  const from = f.from !== undefined ? resolveDate(f.from, now) : undefined;
+  const to = f.to !== undefined ? resolveDate(f.to, now) : undefined;
+  if (from !== undefined && to !== undefined) assertDateOrder(from, to);
+  if (f.category !== undefined) assertKnownCategory(db, f.category);
+
+  const { where, params } = txnWhere({ ...f, from, to });
   const total = (
     db.prepare(`SELECT COUNT(*) AS n FROM transactions ${where}`).get(params) as { n: number }
   ).n;
@@ -70,7 +98,12 @@ export function listTransactions(
   return { transactions, total, meta: metaFor(db, now, f.accountId) };
 }
 
-export type SpendingGroupBy = 'category' | 'merchant' | 'month' | 'account';
+export type SpendingGroupBy =
+  | 'category'
+  | 'merchant'
+  | 'month'
+  | 'account'
+  | 'payment_channel';
 
 export interface SpendingFilters {
   from: string;
@@ -83,64 +116,176 @@ export interface SpendingFilters {
 
 export interface SpendingGroup {
   key: string;
-  total: number;
+  /** Integer cents, always positive. Converted to dollars in views.ts. */
+  totalCents: number;
   count: number;
   share: number;
 }
 
+/**
+ * How rows are bucketed. Merchant buckets on the stable entity id so
+ * "Amazon" and "AMZN Mktp US*2K4" land together, falling back to the display
+ * name for institutions that report no entity id.
+ */
 const GROUP_EXPR: Record<SpendingGroupBy, string> = {
-  category: "COALESCE(category, 'uncategorized')",
-  merchant: "COALESCE(NULLIF(counterparty, ''), 'unknown')",
+  category: "COALESCE(category_primary, 'UNCATEGORIZED')",
+  merchant:
+    "COALESCE(NULLIF(merchant_entity_id, ''), NULLIF(counterparty, ''), 'unknown')",
   month: 'substr(date, 1, 7)',
   account: 'account_id',
+  payment_channel: "COALESCE(NULLIF(payment_channel, ''), 'other')",
 };
+
+/**
+ * What the bucket is called in the output. Identical to GROUP_EXPR except for
+ * merchant, where the bucket is an opaque entity id nobody wants to read — so
+ * the label is a name drawn from the bucket's rows instead.
+ *
+ * MIN() rather than MAX() only for determinism; any row's name is equally valid
+ * and they are variants of the same merchant by construction.
+ */
+const KEY_EXPR: Record<SpendingGroupBy, string> = {
+  ...GROUP_EXPR,
+  merchant: "COALESCE(MIN(NULLIF(counterparty, '')), 'unknown')",
+};
+
+export interface CategoryCount {
+  category: string;
+  count: number;
+}
+
+/**
+ * The only source of truth for "what categories exist": Plaid's SDK types
+ * `personal_finance_category.primary` as a bare `string`, no enum, and ships no
+ * endpoint that enumerates the taxonomy. What's actually in the local cache is
+ * all there is to validate `--category` against or offer for discovery.
+ */
+function distinctCategoryCounts(db: Db): CategoryCount[] {
+  return db
+    .prepare(
+      `SELECT ${GROUP_EXPR['category']} AS category, COUNT(*) AS count
+       FROM transactions
+       GROUP BY category
+       ORDER BY count DESC`,
+    )
+    .all() as CategoryCount[];
+}
+
+export function listCategories(
+  db: Db,
+  now: () => number = Date.now,
+): { categories: CategoryCount[]; meta: QueryMeta } {
+  return { categories: distinctCategoryCounts(db), meta: metaFor(db, now) };
+}
+
+export function assertKnownCategory(db: Db, category: string): void {
+  const known = distinctCategoryCounts(db).map(c => c.category);
+  if (known.length === 0) return; // nothing synced yet — nothing to validate against
+  if (!known.some(c => c.toUpperCase() === category.toUpperCase())) {
+    throw new Error(
+      `category "${category}" is not known. Valid values: ${known.join(', ')}. ` +
+        'Run `ledger categories` (or the list_categories MCP tool) to see this list with counts.',
+    );
+  }
+}
 
 export function spendingSummary(
   db: Db,
   f: SpendingFilters,
   now: () => number = Date.now,
-): { groups: SpendingGroup[]; grandTotal: number; meta: QueryMeta } {
+): { groups: SpendingGroup[]; grandTotalCents: number; meta: QueryMeta } {
+  const from = resolveDate(f.from, now);
+  const to = resolveDate(f.to, now);
+  assertDateOrder(from, to);
+
   const clauses = ['date >= @from', 'date <= @to'];
-  const params: Record<string, unknown> = { from: f.from, to: f.to };
+  const params: Record<string, unknown> = { from, to };
   if (f.accountId !== undefined) { clauses.push('account_id = @accountId'); params['accountId'] = f.accountId; }
   if (f.includePending !== true) clauses.push("status = 'posted'");
-  // Spend = negative amounts (Teller sign convention). Sole definition of "spend".
-  if (f.includeInflows !== true) clauses.push('amount < 0');
+  // Spend = POSITIVE amounts under Plaid's sign convention, which is the inverse
+  // of a bank statement. Sole definition of "spend" in the codebase.
+  if (f.includeInflows !== true) clauses.push('amount_cents > 0');
 
   const rows = db
     .prepare(
-      `SELECT ${GROUP_EXPR[f.groupBy]} AS key,
-              SUM(CASE WHEN amount < 0 THEN -amount ELSE amount END) AS total,
+      // Totals are reported as positive magnitudes regardless of direction, so a
+      // caller comparing groups never has to reason about the sign. Summing
+      // INTEGER cents is exact — no rounding error can accumulate here.
+      `SELECT ${KEY_EXPR[f.groupBy]} AS key,
+              SUM(ABS(amount_cents)) AS totalCents,
               COUNT(*) AS count
        FROM transactions
        WHERE ${clauses.join(' AND ')}
-       GROUP BY key
-       ORDER BY total DESC`,
+       GROUP BY ${GROUP_EXPR[f.groupBy]}
+       ORDER BY totalCents DESC`,
     )
-    .all(params) as Array<{ key: string; total: number; count: number }>;
+    .all(params) as Array<{ key: string; totalCents: number; count: number }>;
 
-  const grandTotal = rows.reduce((sum, r) => sum + r.total, 0);
+  const grandTotalCents = rows.reduce((sum, r) => sum + r.totalCents, 0);
   const groups = rows.map(r => ({
     ...r,
-    share: grandTotal === 0 ? 0 : r.total / grandTotal,
+    share: grandTotalCents === 0 ? 0 : r.totalCents / grandTotalCents,
   }));
-  return { groups, grandTotal, meta: metaFor(db, now, f.accountId) };
+  return { groups, grandTotalCents, meta: metaFor(db, now, f.accountId) };
+}
+
+export interface AuthStatusItem {
+  id: string;
+  institution: string;
+  accountCount: number;
+  /** False until the first successful sync completes for this Item. */
+  synced: boolean;
+  /** Products consented for this Item, as recorded locally at link time. */
+  consented: string[];
+  /**
+   * False when this Item lacks consent for a product the current build would
+   * request. Adding it needs `ledger auth consent <item_id>` — an update-mode
+   * browser round-trip, not a re-link.
+   */
+  consentUpToDate: boolean;
 }
 
 export function authStatus(
   db: Db,
-  cfg: TellerConfig,
+  cfg: Pick<LedgerConfig, 'environment'>,
 ): {
   environment: string;
-  certsPresent: boolean;
-  enrollments: Array<{ id: string; institution: string; accountCount: number }>;
+  items: AuthStatusItem[];
 } {
   const rows = db
     .prepare(
-      `SELECT e.id, e.institution, COUNT(a.id) AS accountCount
-       FROM enrollments e LEFT JOIN accounts a ON a.enrollment_id = e.id
-       GROUP BY e.id ORDER BY e.created_at`,
+      `SELECT i.id, i.institution, i.cursor AS cursor, COUNT(a.id) AS accountCount
+       FROM items i LEFT JOIN accounts a ON a.item_id = i.id
+       GROUP BY i.id ORDER BY i.created_at`,
     )
-    .all() as Array<{ id: string; institution: string; accountCount: number }>;
-  return { environment: cfg.environment, certsPresent: certsPresent(cfg), enrollments: rows };
+    .all() as Array<{
+    id: string;
+    institution: string;
+    cursor: string | null;
+    accountCount: number;
+  }>;
+
+  return {
+    environment: cfg.environment,
+    items: rows.map(r => {
+      const consented = itemConsent(db, r.id);
+      return {
+        id: r.id,
+        institution: r.institution,
+        accountCount: r.accountCount,
+        synced: r.cursor !== null,
+        consented,
+        // Superset counts as current: an Item consented for more than this build
+        // asks for is not out of date.
+        consentUpToDate: CONSENTED_PRODUCTS.every(p => consented.includes(String(p))),
+      };
+    }),
+  };
+}
+
+/** Item ids that exist but have never completed a sync. */
+export function unsyncedItemIds(db: Db): string[] {
+  return listItems(db)
+    .filter(i => i.cursor === null)
+    .map(i => i.id);
 }

@@ -88,7 +88,13 @@ export function buildMcpServer(deps: Deps): McpServer {
         'category case-insensitively (e.g. food_and_drink matches FOOD_AND_DRINK); use ' +
         '\'UNCATEGORIZED\' for transactions with no category. An unknown category throws, listing ' +
         'the valid values — call list_categories first if unsure what exists. Returns the total ' +
-        'match count alongside the paginated rows.',
+        'match count alongside the paginated rows. ' +
+        'Rows carry category_confidence (VERY_HIGH to UNKNOWN, or null) — treat a LOW or ' +
+        'UNKNOWN category as a guess rather than a fact. authorized_date is when the ' +
+        'purchase happened and date is when it posted; use authorized_date when it is ' +
+        'present and the question is about a specific day. counterparty_type of ' +
+        '\'payment_app\' means counterparty is Venmo, Cash App, or similar — the app, not ' +
+        'whoever was actually paid.',
       inputSchema: {
         accountId: z.string().optional(),
         from: z.string().optional().describe('inclusive start date: yyyy-mm-dd or a relative keyword'),
@@ -104,11 +110,20 @@ export function buildMcpServer(deps: Deps): McpServer {
         status: z.enum(['posted', 'pending']).optional(),
         limit: z.number().int().positive().max(1000).optional().describe('default 100'),
         offset: z.number().int().nonnegative().optional(),
+        verbose: z
+          .boolean()
+          .optional()
+          .describe(
+            'return every stored field instead of the default subset — raw bank memo, ' +
+              'full location, payment_meta, merchant logo and website, and the complete ' +
+              'counterparties chain. Costs substantially more context per row; ask for it ' +
+              'when a specific question needs those fields, not by default.',
+          ),
       },
     },
     async args => {
       try {
-        return ok(transactionsResultView(listTransactions(deps.db, args)));
+        return ok(transactionsResultView(listTransactions(deps.db, args), { verbose: args.verbose }));
       } catch (error) {
         return err(error);
       }
@@ -145,11 +160,14 @@ export function buildMcpServer(deps: Deps): McpServer {
         'to count not-yet-settled transactions. ' +
         'from/to accept yyyy-mm-dd or a relative keyword: today, yesterday, this-month, last-month, ' +
         'end-of-last-month, this-year, or <N>-days-ago (e.g. 30-days-ago) — an invalid date or an ' +
-        'inverted range (from after to) throws rather than silently returning an empty result.',
+        'inverted range (from after to) throws rather than silently returning an empty result. ' +
+        'Grouping by merchant collapses spelling variants of the same merchant using ' +
+        'Plaid\'s stable entity id, so "Amazon" and "AMZN Mktp US*2K4" total as one row. ' +
+        'Grouping by payment_channel splits online, in store, and other.',
       inputSchema: {
         from: z.string().describe('inclusive start date: yyyy-mm-dd or a relative keyword'),
         to: z.string().describe('inclusive end date: yyyy-mm-dd or a relative keyword'),
-        groupBy: z.enum(['category', 'merchant', 'month', 'account']),
+        groupBy: z.enum(['category', 'merchant', 'month', 'account', 'payment_channel']),
         accountId: z.string().optional(),
         includePending: z.boolean().optional(),
         includeInflows: z.boolean().optional(),

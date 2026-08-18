@@ -56,7 +56,12 @@ function txnWhere(f: TxnFilters): { where: string; params: Record<string, unknow
   }
   if (f.status !== undefined) { clauses.push('status = @status'); params['status'] = f.status; }
   if (f.search !== undefined) {
-    clauses.push("(description LIKE @search OR counterparty LIKE @search)");
+    // original_description is the raw bank memo. It carries store numbers and
+    // reference codes that Plaid strips from `description`, which is exactly
+    // what someone pasting a line off a statement will search for.
+    clauses.push(
+      '(description LIKE @search OR counterparty LIKE @search OR original_description LIKE @search)',
+    );
     params['search'] = `%${f.search}%`;
   }
   return { where: clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '', params };
@@ -85,7 +90,12 @@ export function listTransactions(
   return { transactions, total, meta: metaFor(db, now, f.accountId) };
 }
 
-export type SpendingGroupBy = 'category' | 'merchant' | 'month' | 'account';
+export type SpendingGroupBy =
+  | 'category'
+  | 'merchant'
+  | 'month'
+  | 'account'
+  | 'payment_channel';
 
 export interface SpendingFilters {
   from: string;
@@ -104,11 +114,31 @@ export interface SpendingGroup {
   share: number;
 }
 
+/**
+ * How rows are bucketed. Merchant buckets on the stable entity id so
+ * "Amazon" and "AMZN Mktp US*2K4" land together, falling back to the display
+ * name for institutions that report no entity id.
+ */
 const GROUP_EXPR: Record<SpendingGroupBy, string> = {
   category: "COALESCE(category_primary, 'UNCATEGORIZED')",
-  merchant: "COALESCE(NULLIF(counterparty, ''), 'unknown')",
+  merchant:
+    "COALESCE(NULLIF(merchant_entity_id, ''), NULLIF(counterparty, ''), 'unknown')",
   month: 'substr(date, 1, 7)',
   account: 'account_id',
+  payment_channel: "COALESCE(NULLIF(payment_channel, ''), 'other')",
+};
+
+/**
+ * What the bucket is called in the output. Identical to GROUP_EXPR except for
+ * merchant, where the bucket is an opaque entity id nobody wants to read — so
+ * the label is a name drawn from the bucket's rows instead.
+ *
+ * MIN() rather than MAX() only for determinism; any row's name is equally valid
+ * and they are variants of the same merchant by construction.
+ */
+const KEY_EXPR: Record<SpendingGroupBy, string> = {
+  ...GROUP_EXPR,
+  merchant: "COALESCE(MIN(NULLIF(counterparty, '')), 'unknown')",
 };
 
 export interface CategoryCount {
@@ -173,12 +203,12 @@ export function spendingSummary(
       // Totals are reported as positive magnitudes regardless of direction, so a
       // caller comparing groups never has to reason about the sign. Summing
       // INTEGER cents is exact — no rounding error can accumulate here.
-      `SELECT ${GROUP_EXPR[f.groupBy]} AS key,
+      `SELECT ${KEY_EXPR[f.groupBy]} AS key,
               SUM(ABS(amount_cents)) AS totalCents,
               COUNT(*) AS count
        FROM transactions
        WHERE ${clauses.join(' AND ')}
-       GROUP BY key
+       GROUP BY ${GROUP_EXPR[f.groupBy]}
        ORDER BY totalCents DESC`,
     )
     .all(params) as Array<{ key: string; totalCents: number; count: number }>;

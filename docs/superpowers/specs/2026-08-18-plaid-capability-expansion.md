@@ -258,7 +258,7 @@ before 3 is also valid.
    of deleting it — re-linking every bank — rather than claiming no data is lost.
 2. A freshly created database carries every column and index the row types
    declare, verified by round-tripping a fully populated row.
-3. `spending --group-by merchant` groups Amazon name variants into one row.
+3. `spending --by merchant` groups Amazon name variants into one row.
 4. `ledger auth consent <item>` completes against an existing Item without
    creating a second Item.
 5. `ledger recurring` lists streams with predicted next dates after a sandbox

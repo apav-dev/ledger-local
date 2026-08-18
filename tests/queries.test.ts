@@ -32,8 +32,8 @@ describe('listTransactions', () => {
     expect(august.total).toBe(5);
     const acc2 = listTransactions(db, { accountId: 'acc_2' }, () => NOW);
     expect(acc2.transactions.map(t => t.id)).toEqual(['t6']);
-    const costco = listTransactions(db, { search: 'costco' }, () => NOW);
-    expect(costco.transactions.map(t => t.id)).toEqual(['t1']);
+    const amazon = listTransactions(db, { search: 'amazon' }, () => NOW);
+    expect(amazon.transactions.map(t => t.id)).toEqual(['t1']);
   });
 
   it('filters on the Plaid primary category', () => {
@@ -204,7 +204,14 @@ describe('spendingSummary', () => {
       { from: '2026-07-01', to: '2026-08-31', groupBy: 'merchant' },
       () => NOW,
     );
-    expect(groups.map(g => g.key)).toContain('Costco');
+    // The display label is any name from the bucket; the guarantee is that
+    // variants collapse, not which variant wins. In real Plaid data this rarely
+    // bites because counterparty comes from merchant_name, which Plaid has
+    // already normalised — the seed's two spellings are a deliberately harsh case.
+    const amazon = groups.filter(g => g.key === 'Amazon' || g.key === 'AMZN Mktp US');
+    expect(amazon).toHaveLength(1);
+    expect(amazon[0]?.count).toBe(2);
+    expect(amazon[0]?.totalCents).toBe(8000);
   });
 
   it('labels missing categories as UNCATEGORIZED', () => {
@@ -255,6 +262,61 @@ describe('spendingSummary', () => {
       () => NOW,
     );
     expect(grandTotalCents).toBe(12_000);
+  });
+});
+
+describe('merchant grouping', () => {
+  it('collapses name variants that share a merchant entity id', () => {
+    const db = seedDb();
+
+    const { groups } = spendingSummary(
+      db,
+      { from: '2026-08-01', to: '2026-08-31', groupBy: 'merchant' },
+      () => NOW,
+    );
+
+    const amazon = groups.filter(g => g.key === 'Amazon' || g.key === 'AMZN Mktp US');
+    expect(amazon).toHaveLength(1);
+    expect(amazon[0]?.count).toBe(2);
+    expect(amazon[0]?.totalCents).toBe(8000);
+  });
+
+  it('still groups by name when no entity id is present', () => {
+    const db = seedDb();
+
+    const { groups } = spendingSummary(
+      db,
+      { from: '2026-07-01', to: '2026-07-31', groupBy: 'merchant' },
+      () => NOW,
+    );
+
+    expect(groups.map(g => g.key)).toContain('Blue Bottle');
+  });
+});
+
+describe('payment_channel grouping', () => {
+  it('totals spending by channel', () => {
+    const db = seedDb();
+
+    const { groups } = spendingSummary(
+      db,
+      { from: '2026-08-01', to: '2026-08-31', groupBy: 'payment_channel' },
+      () => NOW,
+    );
+
+    const online = groups.find(g => g.key === 'online');
+    expect(online?.totalCents).toBe(8000);
+    expect(online?.count).toBe(2);
+  });
+});
+
+describe('search', () => {
+  it('matches the raw bank memo as well as the cleaned description', () => {
+    const db = seedDb();
+
+    const { transactions } = listTransactions(db, { search: 'AMZN MKTP US*2K4' }, () => NOW);
+
+    expect(transactions.map(t => t.id)).toEqual(['t2']);
   });
 });
 

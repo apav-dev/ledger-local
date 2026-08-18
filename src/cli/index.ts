@@ -377,7 +377,7 @@ program
           ...(opts.limit !== undefined && { limit: Number(opts.limit) }),
         });
         if (json) {
-          process.stdout.write(JSON.stringify(transactionsResultView(result), null, 2) + '\n');
+          process.stdout.write(JSON.stringify(transactionsResultView(result, { verbose: true }), null, 2) + '\n');
           return;
         }
         process.stdout.write(
@@ -406,7 +406,7 @@ program
     '--to <date>',
     'yyyy-mm-dd or relative: today, yesterday, this-month, last-month, N-days-ago',
   )
-  .option('--by <group>', 'category|merchant|month|account', 'category')
+  .option('--by <group>', 'category|merchant|month|account|payment_channel', 'category')
   .option('--account <id>')
   .option('--include-pending', 'count transactions that have not settled yet')
   .option('--include-inflows', 'also count money coming in')
@@ -425,8 +425,10 @@ program
         },
       ) => {
         const groupBy = opts.by as SpendingGroupBy;
-        if (!['category', 'merchant', 'month', 'account'].includes(groupBy)) {
-          throw new Error(`--by must be category|merchant|month|account, got "${opts.by}"`);
+        if (!['category', 'merchant', 'month', 'account', 'payment_channel'].includes(groupBy)) {
+          throw new Error(
+            `--by must be category|merchant|month|account|payment_channel, got "${opts.by}"`,
+          );
         }
         const result = spendingSummary(db, {
           from: opts.from,

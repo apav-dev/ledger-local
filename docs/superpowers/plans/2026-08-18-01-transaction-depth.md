@@ -1406,12 +1406,12 @@ posted), `original_description` (the raw bank memo), `category_confidence`,
 `merchant_entity_id` (a stable merchant key), `counterparty_type`,
 `payment_channel`, `transaction_code`, and `location_city` / `location_region`.
 
-Two of these change how results read. `spending --group-by merchant` buckets on
+Two of these change how results read. `spending --by merchant` buckets on
 `merchant_entity_id`, so spelling variants of one merchant total as a single
 row. A `counterparty_type` of `payment_app` means the counterparty is Venmo or
 similar — the app, not whoever was actually paid.
 
-`spending --group-by payment_channel` splits online, in store, and other.
+`spending --by payment_channel` splits online, in store, and other.
 ```
 
 - [ ] **Step 12: Commit**

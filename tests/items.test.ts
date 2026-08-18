@@ -11,10 +11,10 @@ import {
   upsertTransactions,
   type AccountUpsert,
   type Db,
-  type TransactionRow,
 } from '../src/core/db.js';
 import { PlaidApiError } from '../src/core/plaid-client.js';
 import { ItemError, removeLinkedItem } from '../src/core/items.js';
+import { fullTransactionRow } from './helpers.js';
 
 function account(id: string, itemId: string): AccountUpsert {
   return {
@@ -29,22 +29,6 @@ function account(id: string, itemId: string): AccountUpsert {
     iso_currency_code: 'USD',
     available_balance_cents: 1000,
     current_balance_cents: 1000,
-  };
-}
-
-function txn(id: string, accountId: string): TransactionRow {
-  return {
-    id,
-    account_id: accountId,
-    date: '2026-08-01',
-    description: 'X',
-    amount_cents: 500,
-    category_primary: null,
-    category_detailed: null,
-    counterparty: null,
-    status: 'posted',
-    type: 'in store',
-    pending_transaction_id: null,
   };
 }
 
@@ -69,10 +53,10 @@ function seed(): Db {
   upsertAccount(db, account('acc_1b', 'item_1'));
   upsertAccount(db, account('acc_2a', 'item_2'));
   upsertTransactions(db, [
-    txn('t1', 'acc_1a'),
-    txn('t2', 'acc_1a'),
-    txn('t3', 'acc_1b'),
-    txn('t4', 'acc_2a'),
+    fullTransactionRow({ id: 't1', account_id: 'acc_1a' }),
+    fullTransactionRow({ id: 't2', account_id: 'acc_1a' }),
+    fullTransactionRow({ id: 't3', account_id: 'acc_1b' }),
+    fullTransactionRow({ id: 't4', account_id: 'acc_2a' }),
   ]);
   return db;
 }

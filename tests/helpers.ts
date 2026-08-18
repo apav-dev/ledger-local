@@ -70,19 +70,50 @@ export function seedDb(): Db {
   setAccountSynced(db, 'acc_1', NOW - 60_000); // 1 min ago
   setAccountSynced(db, 'acc_2', NOW - 60_000);
 
+  // Only the fields a test asserts on carry values; the other 30 are null. This
+  // is the inverse of `fullTransactionRow`, which is all-non-null so it can
+  // catch a column dropped from the upsert.
   const t = (id: string, over: Partial<TransactionRow>): TransactionRow => ({
     id, account_id: 'acc_1', date: '2026-08-10', description: 'X', amount_cents: 1000,
     category_primary: null, category_detailed: null, counterparty: null,
-    status: 'posted', type: 'in store', pending_transaction_id: null, ...over,
+    status: 'posted', pending_transaction_id: null,
+    authorized_date: null, authorized_datetime: null, datetime: null,
+    original_description: null,
+    iso_currency_code: 'USD', unofficial_currency_code: null,
+    category_confidence: null, category_icon_url: null,
+    merchant_entity_id: null,
+    website: null, logo_url: null,
+    counterparty_type: null, counterparties_json: null,
+    payment_channel: 'in store', transaction_code: null,
+    check_number: null, account_owner: null,
+    location_address: null, location_city: null, location_region: null,
+    location_postal_code: null, location_country: null,
+    location_lat: null, location_lon: null, location_store_number: null,
+    payment_meta_reference_number: null, payment_meta_ppd_id: null,
+    payment_meta_payee: null, payment_meta_by_order_of: null,
+    payment_meta_payer: null, payment_meta_payment_method: null,
+    payment_meta_payment_processor: null, payment_meta_reason: null,
+    ...over,
   });
 
   upsertTransactions(db, [
-    t('t1', { amount_cents: 5000, category_primary: 'GROCERIES', counterparty: 'Costco', date: '2026-08-01' }),
-    t('t2', { amount_cents: 3000, category_primary: 'GROCERIES', counterparty: 'Safeway', date: '2026-08-05' }),
-    t('t3', { amount_cents: 2000, category_primary: 'FOOD_AND_DRINK', counterparty: 'Blue Bottle', date: '2026-07-20' }),
-    t('t4', { amount_cents: -200_000, category_primary: 'INCOME', counterparty: 'Employer', date: '2026-08-01' }),
-    t('t5', { amount_cents: 9900, category_primary: 'FOOD_AND_DRINK', counterparty: 'Sushi', status: 'pending', date: '2026-08-15' }),
-    t('t6', { amount_cents: 4000, category_primary: 'TRAVEL', counterparty: 'BART', account_id: 'acc_2', date: '2026-08-08' }),
+    // t1 and t2 share a merchant entity under two different display names. This
+    // is the case merchant grouping has to collapse.
+    t('t1', { amount_cents: 5000, category_primary: 'GROCERIES', counterparty: 'Amazon',
+              merchant_entity_id: 'ent_amazon', date: '2026-08-01',
+              original_description: 'AMAZON MKTPL', payment_channel: 'online' }),
+    t('t2', { amount_cents: 3000, category_primary: 'GROCERIES', counterparty: 'AMZN Mktp US',
+              merchant_entity_id: 'ent_amazon', date: '2026-08-05',
+              original_description: 'AMZN MKTP US*2K4', payment_channel: 'online' }),
+    t('t3', { amount_cents: 2000, category_primary: 'FOOD_AND_DRINK', counterparty: 'Blue Bottle',
+              date: '2026-07-20', authorized_date: '2026-07-19',
+              category_confidence: 'VERY_HIGH', location_city: 'Oakland', location_region: 'CA' }),
+    t('t4', { amount_cents: -200_000, category_primary: 'INCOME', counterparty: 'Employer',
+              date: '2026-08-01', payment_channel: 'other', transaction_code: 'direct deposit' }),
+    t('t5', { amount_cents: 9900, category_primary: 'FOOD_AND_DRINK', counterparty: 'Sushi',
+              status: 'pending', date: '2026-08-15' }),
+    t('t6', { amount_cents: 4000, category_primary: 'TRAVEL', counterparty: 'BART',
+              account_id: 'acc_2', date: '2026-08-08' }),
   ]);
   return db;
 }

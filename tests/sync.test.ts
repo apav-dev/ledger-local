@@ -199,7 +199,7 @@ describe('toTransactionRow field mapping', () => {
             logo_url: null,
             confidence_level: 'HIGH',
           },
-        ] as Transaction['counterparties'],
+        ] as NonNullable<Transaction['counterparties']>,
       }),
     );
 
@@ -256,10 +256,10 @@ describe('toTransactionRow field mapping', () => {
             website: null, logo_url: null, confidence_level: 'HIGH' },
           { name: 'Corner Store', type: 'merchant' as never, entity_id: 'ent_c',
             website: null, logo_url: null, confidence_level: 'MEDIUM' },
-        ] as Transaction['counterparties'],
+        ] as NonNullable<Transaction['counterparties']>,
       }),
     );
-    const without = toTransactionRow(txn('t_nocp', { counterparties: undefined }));
+    const without = toTransactionRow(txn('t_nocp', {}));
 
     // The full chain survives even though only the primary is denormalised.
     expect(JSON.parse(withArray.counterparties_json ?? '[]')).toHaveLength(2);

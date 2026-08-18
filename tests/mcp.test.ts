@@ -75,7 +75,7 @@ describe('mcp server', () => {
     const client = await connect();
     const result = await client.callTool({
       name: 'list_transactions',
-      arguments: { search: 'costco', limit: 5 },
+      arguments: { search: 'amazon', limit: 5 },
     });
     const data = textOf(result) as { transactions: Array<{ id: string }> };
     expect(data.transactions.map(t => t.id)).toEqual(['t1']);
@@ -144,7 +144,7 @@ describe('mcp server', () => {
     it('emits dollar amounts, not cents', async () => {
       const client = await connect();
       const txns = textOf(
-        await client.callTool({ name: 'list_transactions', arguments: { search: 'costco' } }),
+        await client.callTool({ name: 'list_transactions', arguments: { search: 'amazon' } }),
       ) as { transactions: Array<{ amount: number }> };
       expect(txns.transactions[0]?.amount).toBe(50); // 5000 cents
 

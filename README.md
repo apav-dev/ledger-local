@@ -191,6 +191,21 @@ The conversion happens in one place each way: `src/core/money.ts` at ingest,
 `src/core/views.ts` on output. Both frontends share the same views, so the CLI
 and MCP cannot report different numbers.
 
+### What is stored per transaction
+
+Beyond amount, date, and description, each row carries Plaid's enrichment:
+`authorized_date` (when the purchase happened, as opposed to `date`, when it
+posted), `original_description` (the raw bank memo), `category_confidence`,
+`merchant_entity_id` (a stable merchant key), `counterparty_type`,
+`payment_channel`, `transaction_code`, and `location_city` / `location_region`.
+
+Two of these change how results read. `spending --by merchant` buckets on
+`merchant_entity_id`, so spelling variants of one merchant total as a single
+row. A `counterparty_type` of `payment_app` means the counterparty is Venmo or
+similar — the app, not whoever was actually paid.
+
+`spending --by payment_channel` splits online, in store, and other.
+
 ## MCP
 
 Register `dist/mcp/index.js` as a stdio MCP server. Tools: `list_accounts`,
@@ -218,9 +233,11 @@ environment that created it. There are no migrations: a database written by an
 incompatible build, or opened under the wrong environment, is rejected with an
 explanation rather than silently misbehaving.
 
-Deleting the database loses your access tokens, which means re-linking every
-bank and spending Item slots again. Transactions are all re-downloadable; the
-enrollments are not.
+That policy is only tenable while nothing is linked. Deleting the database
+destroys the access tokens, which is the one thing Plaid will not resend, so
+once you have real banks connected a rejected database means re-linking all of
+them and spending Item slots. **Make schema changes before you link, or expect
+to pay for them.**
 
 ## How sync works
 

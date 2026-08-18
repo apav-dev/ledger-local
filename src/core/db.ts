@@ -145,7 +145,7 @@ export interface SyncPage {
  * with a confusing missing-column error — `CREATE TABLE IF NOT EXISTS` silently
  * no-ops against an existing table with different columns.
  */
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -226,6 +226,28 @@ CREATE INDEX IF NOT EXISTS idx_txn_category ON transactions(category_primary);
 CREATE INDEX IF NOT EXISTS idx_txn_merchant_entity ON transactions(merchant_entity_id);
 CREATE INDEX IF NOT EXISTS idx_txn_authorized_date ON transactions(authorized_date);
 CREATE INDEX IF NOT EXISTS idx_acct_item ON accounts(item_id);
+CREATE TABLE IF NOT EXISTS recurring_streams (
+  stream_id            TEXT PRIMARY KEY,
+  item_id              TEXT NOT NULL REFERENCES items(id),
+  account_id           TEXT NOT NULL REFERENCES accounts(id),
+  direction            TEXT NOT NULL,
+  description          TEXT NOT NULL,
+  merchant_name        TEXT,
+  category_primary     TEXT,
+  category_detailed    TEXT,
+  frequency            TEXT NOT NULL,
+  status               TEXT NOT NULL,
+  is_active            INTEGER NOT NULL,
+  first_date           TEXT NOT NULL,
+  last_date            TEXT NOT NULL,
+  predicted_next_date  TEXT,
+  average_amount_cents INTEGER,
+  last_amount_cents    INTEGER,
+  transaction_count    INTEGER NOT NULL,
+  refreshed_at         INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stream_item ON recurring_streams(item_id);
+CREATE INDEX IF NOT EXISTS idx_stream_next ON recurring_streams(predicted_next_date);
 `;
 
 /** True when the core tables already exist, i.e. something wrote this file before. */
@@ -430,6 +452,8 @@ export function removeItem(db: Db, itemId: string): RemovedItemCounts {
         .prepare(`DELETE FROM transactions WHERE account_id IN (${placeholders})`)
         .run(...batch).changes;
     }
+    // Streams reference both items and accounts; clear them before accounts.
+    db.prepare('DELETE FROM recurring_streams WHERE item_id = ?').run(itemId);
     const accounts = db.prepare('DELETE FROM accounts WHERE item_id = ?').run(itemId).changes;
     db.prepare('DELETE FROM items WHERE id = ?').run(itemId);
     return { accounts, transactions };
@@ -639,4 +663,95 @@ export function applySyncPage(
     };
   });
   return run();
+}
+
+// --------------------------------------------------- recurring streams
+
+export interface RecurringStreamRow {
+  stream_id: string;
+  item_id: string;
+  account_id: string;
+  /** 'inflow' (money arriving) or 'outflow' (money leaving). */
+  direction: string;
+  description: string;
+  merchant_name: string | null;
+  category_primary: string | null;
+  category_detailed: string | null;
+  /** UNKNOWN | WEEKLY | BIWEEKLY | SEMI_MONTHLY | MONTHLY | ANNUALLY */
+  frequency: string;
+  /**
+   * UNKNOWN | MATURE | EARLY_DETECTION | TOMBSTONED.
+   * TOMBSTONED means a previously detected stream stopped arriving — the signal
+   * that a subscription ended.
+   */
+  status: string;
+  /** SQLite has no boolean: 0 or 1. */
+  is_active: number;
+  first_date: string;
+  last_date: string;
+  /** Null when Plaid cannot predict the next occurrence. */
+  predicted_next_date: string | null;
+  /** Integer cents, Plaid-native sign. Null when Plaid reports no amount. */
+  average_amount_cents: number | null;
+  /** Integer cents, Plaid-native sign. Null when Plaid reports no amount. */
+  last_amount_cents: number | null;
+  transaction_count: number;
+  refreshed_at: number;
+}
+
+/**
+ * Replaces every stream belonging to `itemId`, returning how many were deleted.
+ *
+ * Replace, never merge. `/transactions/recurring/get` returns a full snapshot
+ * with no cursor and no `removed` list, so a stream absent from the response has
+ * ended. Merging would leave dead subscriptions in the table forever, and a
+ * "what am I paying for" answer built on it would be wrong in the one direction
+ * that matters.
+ *
+ * One transaction, so a failure mid-write cannot leave the Item with a partial
+ * set that looks authoritative.
+ */
+export function replaceRecurringStreams(
+  db: Db,
+  itemId: string,
+  rows: readonly RecurringStreamRow[],
+): number {
+  const run = db.transaction((): number => {
+    const deleted = db
+      .prepare('DELETE FROM recurring_streams WHERE item_id = ?')
+      .run(itemId).changes;
+    const stmt = db.prepare(
+      `INSERT INTO recurring_streams (
+         stream_id, item_id, account_id, direction, description, merchant_name,
+         category_primary, category_detailed, frequency, status, is_active,
+         first_date, last_date, predicted_next_date, average_amount_cents,
+         last_amount_cents, transaction_count, refreshed_at
+       ) VALUES (
+         @stream_id, @item_id, @account_id, @direction, @description, @merchant_name,
+         @category_primary, @category_detailed, @frequency, @status, @is_active,
+         @first_date, @last_date, @predicted_next_date, @average_amount_cents,
+         @last_amount_cents, @transaction_count, @refreshed_at
+       )`,
+    );
+    for (const row of rows) stmt.run(row);
+    return deleted;
+  });
+  return run();
+}
+
+export function listRecurringStreamRows(db: Db): RecurringStreamRow[] {
+  return db
+    .prepare(
+      `SELECT * FROM recurring_streams
+       ORDER BY direction, ABS(COALESCE(average_amount_cents, 0)) DESC, description`,
+    )
+    .all() as RecurringStreamRow[];
+}
+
+/** Oldest refresh across all streams, or null when none are stored. */
+export function lastRecurringRefreshAt(db: Db): number | null {
+  const row = db.prepare('SELECT MIN(refreshed_at) AS oldest FROM recurring_streams').get() as {
+    oldest: number | null;
+  };
+  return row.oldest;
 }

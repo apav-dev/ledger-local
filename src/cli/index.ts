@@ -19,8 +19,10 @@ import { runInit } from './init.js';
 import { createTtyPrompter, type Prompter } from './prompt.js';
 // Money is stored as integer cents; --json emits dollars through these views, the
 // same ones the MCP server uses, so the two frontends cannot disagree.
+import { listRecurring, refreshRecurring, type RecurringRefreshResult } from '../core/recurring.js';
 import {
   accountsResultView,
+  recurringResultView,
   spendingResultView,
   transactionsResultView,
 } from '../core/views.js';
@@ -103,6 +105,36 @@ function printSyncResults(results: AccountSyncResult[], json: boolean): void {
     );
   }
   if (needsReauth) {
+    process.stderr.write(REAUTH_HINT + '\n');
+    process.exitCode = EXIT_REAUTH;
+  } else if (results.some(r => !r.ok)) {
+    process.exitCode = EXIT_GENERAL;
+  }
+}
+
+const RECURRING_PRODUCT_HINT =
+  'Plaid refused recurring transactions for one or more banks.\n' +
+  '`ledger auth consent` cannot fix this — Recurring Transactions is enabled per\n' +
+  'client_id at Dashboard > Developers > Products, not per Item. Check it is enabled\n' +
+  'there; also note that not every institution supports it.';
+
+function printRecurringRefresh(results: RecurringRefreshResult[], json: boolean): void {
+  if (json) {
+    process.stdout.write(JSON.stringify(results, null, 2) + '\n');
+  } else {
+    process.stdout.write(
+      formatTable(
+        results.map(r => ({
+          institution: r.institution,
+          ok: r.ok ? 'yes' : 'NO',
+          streams: r.streams,
+          error: r.error ?? '',
+        })),
+      ) + '\n',
+    );
+  }
+  if (results.some(r => r.needsConsent)) process.stderr.write(RECURRING_PRODUCT_HINT + '\n');
+  if (results.some(r => r.needsReauth)) {
     process.stderr.write(REAUTH_HINT + '\n');
     process.exitCode = EXIT_REAUTH;
   } else if (results.some(r => !r.ok)) {
@@ -514,6 +546,71 @@ program
         );
       },
     ),
+  );
+
+const recurring = program
+  .command('recurring')
+  .description('recurring bills, subscriptions, and income streams (from local db)')
+  .option('--direction <inflow|outflow>', 'only money in, or only money out')
+  .option('--active', 'hide streams Plaid has marked as ended')
+  .option('--frequency <freq>', 'WEEKLY, BIWEEKLY, SEMI_MONTHLY, MONTHLY, or ANNUALLY')
+  .action(
+    withCtx(
+      program,
+      ({ db, json }, opts: { direction?: string; active?: boolean; frequency?: string }) => {
+        if (opts.direction !== undefined && opts.direction !== 'inflow' && opts.direction !== 'outflow') {
+          fail(`--direction must be "inflow" or "outflow", got "${opts.direction}"`, EXIT_GENERAL, json);
+        }
+        const raw = listRecurring(db, {
+          direction: opts.direction as 'inflow' | 'outflow' | undefined,
+          activeOnly: opts.active,
+          frequency: opts.frequency,
+        });
+
+        if (json) {
+          process.stdout.write(JSON.stringify(recurringResultView(raw), null, 2) + '\n');
+          return;
+        }
+        if (raw.streams.length === 0) {
+          process.stdout.write(
+            'No recurring streams stored. Run `ledger recurring refresh` to fetch them.\n',
+          );
+          return;
+        }
+        process.stdout.write(
+          formatTable(
+            raw.streams.map(s => ({
+              direction: s.direction,
+              merchant: s.merchant_name ?? s.description,
+              frequency: s.frequency,
+              // money() takes integer cents — same path as accounts/transactions/spending.
+              average: money(
+                s.average_amount_cents === null ? null : Math.abs(s.average_amount_cents),
+              ),
+              next: s.predicted_next_date ?? '-',
+              status: s.status,
+              active: s.is_active === 1 ? 'yes' : 'no',
+            })),
+          ) + '\n',
+        );
+        if (raw.meta.stale) {
+          process.stderr.write(
+            'These streams are more than 24h old. Run `ledger recurring refresh`.\n',
+          );
+        }
+      },
+    ),
+  );
+
+recurring
+  .command('refresh')
+  .description('refetch recurring streams from Plaid')
+  .option('--item <id>', 'refresh only this institution')
+  .action(
+    withCtx(program, async ({ cfg, db, json }, opts: { item?: string }) => {
+      const results = await refreshRecurring(db, clientFromConfig(cfg), { itemId: opts.item });
+      printRecurringRefresh(results, json);
+    }),
   );
 
 program.parseAsync().catch(error => handleError(error, Boolean(program.opts()['json'])));

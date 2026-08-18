@@ -13,7 +13,7 @@
  * The view types are derived with `Omit` so adding a column to a row type breaks
  * compilation here rather than silently dropping the field from output.
  */
-import type { AccountRow, TransactionRow } from './db.js';
+import type { AccountRow, RecurringStreamRow, TransactionRow } from './db.js';
 import { centsToDollars, centsToDollarsOrNull } from './money.js';
 import type { QueryMeta, SpendingGroup } from './queries.js';
 
@@ -151,4 +151,49 @@ export function spendingResultView(result: {
     grandTotal: centsToDollars(result.grandTotalCents),
     meta: result.meta,
   };
+}
+
+/**
+ * `is_active` becomes a real boolean here rather than SQLite's 0/1. An agent
+ * reading `is_active: 0` as truthy would report a cancelled subscription as
+ * live, which is the same class of error as reading cents as dollars.
+ */
+export type RecurringStreamView = Omit<
+  RecurringStreamRow,
+  'average_amount_cents' | 'last_amount_cents' | 'is_active'
+> & {
+  average_amount: number | null;
+  last_amount: number | null;
+  is_active: boolean;
+};
+
+export function recurringStreamView(row: RecurringStreamRow): RecurringStreamView {
+  return {
+    stream_id: row.stream_id,
+    item_id: row.item_id,
+    account_id: row.account_id,
+    direction: row.direction,
+    description: row.description,
+    merchant_name: row.merchant_name,
+    category_primary: row.category_primary,
+    category_detailed: row.category_detailed,
+    frequency: row.frequency,
+    status: row.status,
+    is_active: row.is_active === 1,
+    first_date: row.first_date,
+    last_date: row.last_date,
+    predicted_next_date: row.predicted_next_date,
+    // Sign is untouched: an outflow stream reads POSITIVE, as everywhere else.
+    average_amount: centsToDollarsOrNull(row.average_amount_cents),
+    last_amount: centsToDollarsOrNull(row.last_amount_cents),
+    transaction_count: row.transaction_count,
+    refreshed_at: row.refreshed_at,
+  };
+}
+
+export function recurringResultView(result: {
+  streams: RecurringStreamRow[];
+  meta: QueryMeta;
+}): { streams: RecurringStreamView[]; meta: QueryMeta } {
+  return { streams: result.streams.map(recurringStreamView), meta: result.meta };
 }

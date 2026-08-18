@@ -676,9 +676,13 @@ describe('refreshRecurring', () => {
 
     expect(results[0]?.ok).toBe(false);
     expect(results[0]?.needsConsent).toBe(true);
-    // Must NOT advise `ledger auth consent` — that cannot grant this product.
+    // Points at the dashboard, and explicitly rules out the consent command
+    // rather than staying silent about it. Naming the wrong path as wrong is
+    // the whole value here — `ledger auth consent` is exactly what someone
+    // reaches for next, and Plaid rejects recurring_transactions as an
+    // additional_consented_product, so it would waste a browser round-trip.
     expect(results[0]?.error).toMatch(/Dashboard > Developers > Products/);
-    expect(results[0]?.error).not.toMatch(/ledger auth consent/);
+    expect(results[0]?.error).toMatch(/not something `ledger auth consent` can grant/);
     // A failed refresh must not wipe the previous snapshot.
     expect(listRecurringStreamRows(db)).toHaveLength(1);
   });

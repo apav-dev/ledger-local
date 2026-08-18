@@ -4,6 +4,7 @@ import type { QueryMeta } from '../src/core/queries.js';
 import {
   accountsResultView,
   leanTransactionView,
+  recurringStreamView,
   spendingResultView,
   transactionView,
   transactionsResultView,
@@ -177,6 +178,41 @@ describe('spendingResultView', () => {
       meta: META,
     });
     expect(view.groups.find(g => g.key === 'GROCERIES')?.share).toBeCloseTo(80 / 140);
+  });
+});
+
+describe('recurringStreamView', () => {
+  const row = {
+    stream_id: 's1', item_id: 'item_1', account_id: 'acc_1', direction: 'outflow',
+    description: 'NETFLIX', merchant_name: 'Netflix',
+    category_primary: 'ENTERTAINMENT', category_detailed: 'ENTERTAINMENT_STREAMING',
+    frequency: 'MONTHLY', status: 'MATURE', is_active: 1,
+    first_date: '2026-01-15', last_date: '2026-08-15', predicted_next_date: '2026-09-15',
+    average_amount_cents: 1599, last_amount_cents: 1799, transaction_count: 8,
+    refreshed_at: 1000,
+  };
+
+  it('converts cents to dollars and the integer flag to a boolean', () => {
+    const view = recurringStreamView(row);
+
+    expect(view.average_amount).toBe(15.99);
+    expect(view.last_amount).toBe(17.99);
+    expect(view.is_active).toBe(true);
+    expect('average_amount_cents' in view).toBe(false);
+    expect('is_active' in view && typeof view.is_active).toBe('boolean');
+  });
+
+  it('keeps a null amount null rather than reporting zero', () => {
+    const view = recurringStreamView({
+      ...row, average_amount_cents: null, last_amount_cents: null,
+    });
+
+    expect(view.average_amount).toBeNull();
+    expect(view.last_amount).toBeNull();
+  });
+
+  it('maps is_active 0 to false', () => {
+    expect(recurringStreamView({ ...row, is_active: 0 }).is_active).toBe(false);
   });
 });
 

@@ -81,6 +81,11 @@ function fakeApi(
     getLinkSession: overrides.getLinkSession ?? (async () => ({}) as never),
     exchangePublicToken:
       overrides.exchangePublicToken ?? (async () => ({ accessToken: 'a', itemId: 'i' })),
+    getRecurringStreams:
+      overrides.getRecurringStreams ??
+      (async () => {
+        throw new Error('unexpected call');
+      }),
   };
 }
 

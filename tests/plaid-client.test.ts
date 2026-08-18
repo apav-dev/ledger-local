@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { LinkTokenCreateRequest } from 'plaid';
+import type { TransactionsRecurringGetResponse } from 'plaid';
 import {
   CONSENTED_PRODUCTS,
   PlaidApiError,
   PlaidClient,
+  isConsentRequired,
   isProductNotReady,
   isRateLimited,
   isReauthRequired,
@@ -432,5 +434,44 @@ describe('additional_consented_products', () => {
     await client.createLinkToken({});
 
     expect('additional_consented_products' in (calls[0] ?? {})).toBe(false);
+  });
+});
+
+describe('getRecurringStreams', () => {
+  it('returns the raw response', async () => {
+    const client = clientWithStub(
+      {
+        transactionsRecurringGet: async () => ({
+          data: {
+            inflow_streams: [],
+            outflow_streams: [],
+            updated_datetime: '2026-08-18T00:00:00Z',
+            request_id: 'r',
+          } as TransactionsRecurringGetResponse,
+        }),
+      },
+      [],
+    );
+
+    const result = await client.getRecurringStreams('access-tok');
+
+    expect(result.updated_datetime).toBe('2026-08-18T00:00:00Z');
+  });
+
+  it('surfaces a consent failure as a classifiable error', async () => {
+    const client = clientWithStub(
+      {
+        transactionsRecurringGet: async () => {
+          throw wireError(400, {
+            error_code: 'ADDITIONAL_CONSENT_REQUIRED',
+            error_type: 'INVALID_INPUT',
+            error_message: 'consent required',
+          });
+        },
+      },
+      [],
+    );
+
+    await expect(client.getRecurringStreams('access-tok')).rejects.toSatisfy(isConsentRequired);
   });
 });

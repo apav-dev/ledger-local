@@ -11,6 +11,7 @@ import {
   type LinkTokenCreateRequest,
   type LinkTokenCreateResponse,
   type LinkTokenGetResponse,
+  type TransactionsRecurringGetResponse,
   type TransactionsSyncResponse,
 } from 'plaid';
 import type { LedgerConfig, PlaidEnvironment } from './config.js';
@@ -114,6 +115,25 @@ export function isItemNotFound(error: unknown): boolean {
 }
 
 /**
+ * Plaid refused the product, not the credentials. Distinct from a reauth: the
+ * access token is fine, the entitlement is not.
+ *
+ * The fix is NOT `ledger auth consent`. A sandbox probe on 2026-08-18 confirmed
+ * Plaid rejects `recurring_transactions` and `transactions_refresh` as
+ * `additional_consented_products` with INVALID_PRODUCT — they are account-level
+ * products enabled in the dashboard, not per-Item consents. Advising the consent
+ * command here would send the user somewhere that cannot help them.
+ */
+export function isConsentRequired(error: unknown): boolean {
+  return (
+    error instanceof PlaidApiError &&
+    (error.errorCode === 'ADDITIONAL_CONSENT_REQUIRED' ||
+      error.errorCode === 'PRODUCTS_NOT_SUPPORTED' ||
+      error.errorCode === 'INSUFFICIENT_CREDENTIALS')
+  );
+}
+
+/**
  * Plaid's maximum, and the only safe default.
  *
  * `days_requested` fixes how much history Plaid pulls from the institution when
@@ -183,6 +203,11 @@ export interface LedgerPlaidApi {
   exchangePublicToken(publicToken: string): Promise<{ accessToken: string; itemId: string }>;
   /** Deletes the Item at Plaid, freeing its slot and invalidating its access token. */
   itemRemove(accessToken: string): Promise<void>;
+  /**
+   * A full snapshot of every recurring stream on the Item. No cursor, no
+   * `removed` list — callers must replace their stored set, not merge into it.
+   */
+  getRecurringStreams(accessToken: string): Promise<TransactionsRecurringGetResponse>;
 }
 
 const RATE_LIMIT_DELAY_MS = 2_000;
@@ -221,6 +246,9 @@ export interface PlaidSdk {
     public_token: string;
   }): Promise<{ data: ItemPublicTokenExchangeResponse }>;
   itemRemove(req: { access_token: string }): Promise<{ data: ItemRemoveResponse }>;
+  transactionsRecurringGet(req: {
+    access_token: string;
+  }): Promise<{ data: TransactionsRecurringGetResponse }>;
 }
 
 export function sdkFromConfig(
@@ -336,6 +364,12 @@ export class PlaidClient implements LedgerPlaidApi {
         // beginning" and rejects an explicit null.
         ...(cursor === null ? {} : { cursor }),
       }),
+    );
+  }
+
+  getRecurringStreams(accessToken: string): Promise<TransactionsRecurringGetResponse> {
+    return this.#call('/transactions/recurring/get', () =>
+      this.#api.transactionsRecurringGet({ access_token: accessToken }),
     );
   }
 

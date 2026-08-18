@@ -10,11 +10,13 @@ import {
   spendingSummary,
 } from '../core/queries.js';
 import { isReauthRequired, type LedgerPlaidApi } from '../core/plaid-client.js';
+import { listRecurring, refreshRecurring } from '../core/recurring.js';
 import { syncAll } from '../core/sync.js';
 // Money is stored as integer cents. Every tool result goes through a view so the
 // model always sees decimal dollars — the same views the CLI's --json output uses.
 import {
   accountsResultView,
+  recurringResultView,
   spendingResultView,
   transactionsResultView,
 } from '../core/views.js';
@@ -176,6 +178,81 @@ export function buildMcpServer(deps: Deps): McpServer {
     async args => {
       try {
         return ok(spendingResultView(spendingSummary(deps.db, args)));
+      } catch (error) {
+        return err(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'list_recurring',
+    {
+      description:
+        'List recurring bills, subscriptions, and income streams that Plaid detected — the ' +
+        'right tool for "what am I subscribed to", "what bills are due", "what is my fixed ' +
+        'monthly cost", and "did a subscription get more expensive". These are Plaid\'s ' +
+        'detections, not something derivable from list_transactions. ' +
+        'direction is "outflow" for money leaving (bills, subscriptions) and "inflow" for ' +
+        'money arriving (paychecks). average_amount and last_amount are dollars and follow ' +
+        'the same sign convention as list_transactions: POSITIVE means money LEFT the ' +
+        'account, so outflow streams are positive and inflow streams are negative. Report ' +
+        'magnitudes to the user and use direction to say which way the money went. ' +
+        'status is MATURE (established), EARLY_DETECTION (seen too few times to be certain — ' +
+        'say so rather than stating it as fact), TOMBSTONED (it stopped arriving, i.e. the ' +
+        'subscription appears to have ended), or UNKNOWN. is_active is a boolean. ' +
+        'predicted_next_date is null when Plaid cannot predict the next occurrence — do not ' +
+        'infer one from frequency in that case. ' +
+        'Streams come from the local cache. meta.stale=true means they are >24h old — call ' +
+        'refresh_recurring, then call this again. If nothing is returned at all, they have ' +
+        'never been fetched; refresh_recurring is also the fix for that.',
+      inputSchema: {
+        direction: z.enum(['inflow', 'outflow']).optional(),
+        activeOnly: z
+          .boolean()
+          .optional()
+          .describe('exclude streams Plaid has marked as ended (TOMBSTONED)'),
+        frequency: z
+          .enum(['WEEKLY', 'BIWEEKLY', 'SEMI_MONTHLY', 'MONTHLY', 'ANNUALLY', 'UNKNOWN'])
+          .optional(),
+      },
+    },
+    async args => {
+      try {
+        return ok(recurringResultView(listRecurring(deps.db, args)));
+      } catch (error) {
+        return err(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'refresh_recurring',
+    {
+      description:
+        'Refetch recurring streams from the banks via the Plaid API. Call when ' +
+        'list_recurring reports meta.stale=true or returns nothing at all. Takes ~5-30 ' +
+        'seconds per bank. ' +
+        'Each refresh REPLACES every stream for a bank — Plaid returns a full snapshot ' +
+        'with no cursor, so a stream that disappears has ended rather than been lost. ' +
+        'A per-bank failure does not discard that bank\'s existing streams. ' +
+        'If a result carries needsConsent, Plaid refused the product for that bank. Report ' +
+        'the error text verbatim — it explains that this is a dashboard setting, not ' +
+        'something the user can grant from a terminal. Do not retry and do not suggest ' +
+        '`ledger auth consent`, which cannot grant this product.',
+      inputSchema: {
+        itemId: z.string().optional().describe('refresh only this institution'),
+      },
+    },
+    async args => {
+      try {
+        const results = await refreshRecurring(deps.db, deps.api, { itemId: args.itemId });
+        if (results.some(r => r.needsReauth)) {
+          return {
+            content: [{ type: 'text', text: JSON.stringify({ error: REAUTH_GUIDANCE, results }) }],
+            isError: true,
+          };
+        }
+        return ok({ results });
       } catch (error) {
         return err(error);
       }

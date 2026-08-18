@@ -83,6 +83,8 @@ ledger accounts                   balances (local)
 ledger transactions [filters]     query (local)
 ledger spending --from --to       rollups (local)
 ledger categories                 known categories with counts (local)
+ledger recurring [filters]        recurring bills, subs, income (local)
+ledger recurring refresh          refetch streams from Plaid
 ```
 
 Every command takes `--json` except `init`, which is a conversation rather than a
@@ -233,9 +235,45 @@ similar — the app, not whoever was actually paid.
 ## MCP
 
 Register `dist/mcp/index.js` as a stdio MCP server. Tools: `list_accounts`,
-`list_transactions`, `list_categories`, `spending_summary`, `sync`,
-`auth_status`. Setup, linking, and repairing a bank are CLI-only — all three
-need a human at a terminal or a browser.
+`list_transactions`, `list_categories`, `spending_summary`, `list_recurring`,
+`refresh_recurring`, `sync`, `auth_status`. Setup, linking, and repairing a bank
+are CLI-only — all three need a human at a terminal or a browser.
+
+`list_recurring` reads the local stream cache; `refresh_recurring` refetches it
+from the banks. If Plaid refuses the product, the error says so and points at the
+Plaid dashboard — Recurring Transactions is enabled per `client_id`, not granted
+per Item, so `ledger auth consent` cannot fix it.
+
+## Recurring streams
+
+Plaid detects recurring transactions — subscriptions, bills, paychecks — across
+institutions, which is not something this tool can reproduce locally from the
+transactions table. `ledger recurring refresh` fetches them; `ledger recurring`
+reads the local copy.
+
+```
+ledger recurring --active --direction outflow   # live subscriptions and bills
+ledger recurring --direction inflow             # paychecks and other income
+```
+
+Each stream carries a frequency (WEEKLY through ANNUALLY), a status, an average
+and last amount, and a `predicted_next_date` when Plaid can predict one.
+
+Status is worth reading closely:
+
+| Status | Meaning |
+|---|---|
+| `MATURE` | Established — at least three occurrences on a regular cadence |
+| `EARLY_DETECTION` | Seen too few times to be sure. A new subscription looks like this |
+| `TOMBSTONED` | Previously detected, then stopped arriving — the subscription appears to have ended |
+| `UNKNOWN` | None of the above applied |
+
+**The stream set is a snapshot, not a running total.** Each refresh replaces
+every stream for a bank, because Plaid's endpoint returns a full picture with no
+cursor and no removals list. A stream that vanishes between refreshes has ended.
+
+Streams are recalculated by Plaid on its own schedule, so a newly linked account
+may show none until the next periodic update or a `ledger sync --force`.
 
 ## State
 

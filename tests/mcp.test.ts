@@ -3,9 +3,10 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { describe, expect, it } from 'vitest';
 import type { LedgerConfig } from '../src/core/config.js';
 import type { Db } from '../src/core/db.js';
+import { replaceRecurringStreams } from '../src/core/db.js';
 import { PlaidApiError, type LedgerPlaidApi } from '../src/core/plaid-client.js';
 import { buildMcpServer } from '../src/mcp/server.js';
-import { seedDb } from './helpers.js';
+import { NOW, seedDb } from './helpers.js';
 
 const cfg: LedgerConfig = {
   clientId: 'cid_test',
@@ -29,6 +30,9 @@ const noApi: LedgerPlaidApi = {
   createLinkToken: async () => ({ linkToken: 'l', hostedLinkUrl: null }),
   getLinkSession: async () => ({}) as never,
   exchangePublicToken: async () => ({ accessToken: 'a', itemId: 'i' }),
+  getRecurringStreams: async () => {
+    throw new Error('unexpected call');
+  },
 };
 
 async function connect(api: LedgerPlaidApi = noApi, db: Db = seedDb()) {
@@ -50,14 +54,16 @@ function textOf(result: unknown): unknown {
 }
 
 describe('mcp server', () => {
-  it('exposes the six tools', async () => {
+  it('exposes the eight tools', async () => {
     const client = await connect();
     const { tools } = await client.listTools();
     expect(tools.map(t => t.name).sort()).toEqual([
       'auth_status',
       'list_accounts',
       'list_categories',
+      'list_recurring',
       'list_transactions',
+      'refresh_recurring',
       'spending_summary',
       'sync',
     ]);
@@ -299,6 +305,56 @@ describe('mcp server', () => {
       const text = rawText(result);
       expect(text).toMatch(/is not known/);
       expect(text).toContain('GROCERIES');
+    });
+  });
+
+  describe('list_recurring', () => {
+    it('returns stored streams as dollars with a real boolean flag', async () => {
+      const db = seedDb();
+      replaceRecurringStreams(db, 'item_1', [
+        {
+          stream_id: 's1', item_id: 'item_1', account_id: 'acc_1', direction: 'outflow',
+          description: 'NETFLIX', merchant_name: 'Netflix',
+          category_primary: 'ENTERTAINMENT', category_detailed: 'ENTERTAINMENT_STREAMING',
+          frequency: 'MONTHLY', status: 'MATURE', is_active: 1,
+          first_date: '2026-01-15', last_date: '2026-08-15',
+          predicted_next_date: '2026-09-15',
+          average_amount_cents: 1599, last_amount_cents: 1599,
+          transaction_count: 8, refreshed_at: NOW,
+        },
+      ]);
+
+      const client = await connect(noApi, db);
+      const result = textOf(await client.callTool({ name: 'list_recurring', arguments: {} })) as {
+        streams: Array<{ average_amount: number; is_active: boolean }>;
+      };
+
+      expect(result.streams[0]?.average_amount).toBe(15.99);
+      expect(result.streams[0]?.is_active).toBe(true);
+      expect(result.streams[0]).not.toHaveProperty('average_amount_cents');
+    });
+
+    it('honours the activeOnly filter', async () => {
+      const db = seedDb();
+      replaceRecurringStreams(db, 'item_1', [
+        {
+          stream_id: 's_dead', item_id: 'item_1', account_id: 'acc_1', direction: 'outflow',
+          description: 'OLD GYM', merchant_name: 'Gym',
+          category_primary: null, category_detailed: null,
+          frequency: 'MONTHLY', status: 'TOMBSTONED', is_active: 0,
+          first_date: '2025-01-01', last_date: '2026-02-01',
+          predicted_next_date: null,
+          average_amount_cents: 4000, last_amount_cents: 4000,
+          transaction_count: 13, refreshed_at: NOW,
+        },
+      ]);
+
+      const client = await connect(noApi, db);
+      const result = textOf(
+        await client.callTool({ name: 'list_recurring', arguments: { activeOnly: true } }),
+      ) as { streams: unknown[] };
+
+      expect(result.streams).toEqual([]);
     });
   });
 });

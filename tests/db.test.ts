@@ -14,8 +14,11 @@ import {
   listAccountIdsForItem,
   listAccountRows,
   listItems,
+  listRecurringStreamRows,
   openDb,
   readMeta,
+  removeItem,
+  replaceRecurringStreams,
   setAccountSynced,
   setItemConsent,
   setItemCursor,
@@ -25,9 +28,10 @@ import {
   type AccountUpsert,
   type Db,
   type ItemUpsert,
+  type RecurringStreamRow,
   type TransactionRow,
 } from '../src/core/db.js';
-import { fullTransactionRow } from './helpers.js';
+import { fullTransactionRow, seedDb } from './helpers.js';
 
 function tmpDbPath(name: string): string {
   return join(mkdtempSync(join(tmpdir(), 'ledger-test-')), `${name}.db`);
@@ -332,7 +336,7 @@ describe('openDb', () => {
 
   it('stamps a schema version on a fresh database', () => {
     const db = openDb(':memory:', 'sandbox');
-    expect(db.pragma('user_version', { simple: true })).toBe(4);
+    expect(db.pragma('user_version', { simple: true })).toBe(5);
   });
 
   it('reopens its own database without complaint', () => {
@@ -546,9 +550,83 @@ describe('item consent', () => {
     expect(itemConsent(db, 'item_1')).toEqual(['liabilities']);
   });
 
-  it('stamps a fresh database at version 4', () => {
+  it('stamps a fresh database at version 5 with the table present', () => {
     const db = openDb(':memory:', 'sandbox');
 
-    expect(db.pragma('user_version', { simple: true })).toBe(4);
+    expect(db.pragma('user_version', { simple: true })).toBe(5);
+    expect(() => db.prepare('SELECT * FROM recurring_streams').all()).not.toThrow();
+  });
+});
+
+describe('recurring_streams', () => {
+  const stream = (
+    id: string,
+    over: Partial<RecurringStreamRow> = {},
+  ): RecurringStreamRow => ({
+    stream_id: id, item_id: 'item_1', account_id: 'acc_1', direction: 'outflow',
+    description: 'NETFLIX', merchant_name: 'Netflix',
+    category_primary: 'ENTERTAINMENT', category_detailed: 'ENTERTAINMENT_STREAMING',
+    frequency: 'MONTHLY', status: 'MATURE', is_active: 1,
+    first_date: '2026-01-15', last_date: '2026-08-15',
+    predicted_next_date: '2026-09-15',
+    average_amount_cents: 1599, last_amount_cents: 1599,
+    transaction_count: 8, refreshed_at: 1000,
+    ...over,
+  });
+
+  it('replaces the whole set for an item rather than merging', () => {
+    const db = seedDb();
+    replaceRecurringStreams(db, 'item_1', [stream('s1'), stream('s2')]);
+
+    // Plaid returns a full snapshot with no `removed` list, so a stream missing
+    // from a later response has ended and must disappear locally.
+    const removed = replaceRecurringStreams(db, 'item_1', [stream('s2')]);
+
+    expect(removed).toBe(2);
+    expect(listRecurringStreamRows(db).map(s => s.stream_id)).toEqual(['s2']);
+  });
+
+  it('leaves another item\'s streams alone', () => {
+    const db = seedDb();
+    upsertItem(db, {
+      id: 'item_2', access_token: 'tok2', institution: 'Amex',
+      institution_id: 'ins_9', created_at: 2, consented_products: null,
+    });
+    upsertAccount(db, {
+      id: 'acc_3', item_id: 'item_2', name: 'Amex', official_name: null,
+      institution: 'Amex', type: 'credit', subtype: 'credit card', mask: '3333',
+      iso_currency_code: 'USD', available_balance_cents: null, current_balance_cents: null,
+    });
+    replaceRecurringStreams(db, 'item_1', [stream('s1')]);
+    replaceRecurringStreams(db, 'item_2', [
+      stream('s9', { item_id: 'item_2', account_id: 'acc_3' }),
+    ]);
+
+    replaceRecurringStreams(db, 'item_1', []);
+
+    expect(listRecurringStreamRows(db).map(s => s.stream_id)).toEqual(['s9']);
+  });
+
+  it('accepts a stream with no amount and no predicted date', () => {
+    const db = seedDb();
+
+    replaceRecurringStreams(db, 'item_1', [
+      stream('s_sparse', {
+        average_amount_cents: null, last_amount_cents: null, predicted_next_date: null,
+      }),
+    ]);
+
+    const row = listRecurringStreamRows(db)[0];
+    expect(row?.average_amount_cents).toBeNull();
+    expect(row?.predicted_next_date).toBeNull();
+  });
+
+  it('drops an item\'s streams when the item is removed', () => {
+    const db = seedDb();
+    replaceRecurringStreams(db, 'item_1', [stream('s1')]);
+
+    removeItem(db, 'item_1');
+
+    expect(listRecurringStreamRows(db)).toEqual([]);
   });
 });

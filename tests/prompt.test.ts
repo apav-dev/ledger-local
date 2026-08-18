@@ -167,3 +167,18 @@ describe('createTtyPrompter', () => {
     prompter.close();
   });
 });
+
+describe('non-TTY guidance', () => {
+  it('uses the caller supplied way out', () => {
+    // Generic advice for the wrong command is worse than none: `item remove`
+    // must not tell the user to hand-write config.json.
+    expect(() => createTtyPrompter({ isTTY: false, nonTtyHint: 'Pass --yes to skip.' })).toThrow(
+      /Pass --yes to skip/,
+    );
+  });
+
+  it('falls back to a hint that is true for any command', () => {
+    expect(() => createTtyPrompter({ isTTY: false })).toThrow(/Run it directly in a shell/);
+    expect(() => createTtyPrompter({ isTTY: false })).not.toThrow(/config\.json/);
+  });
+});

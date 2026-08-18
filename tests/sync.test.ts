@@ -67,6 +67,7 @@ function fakeApi(
 ): LedgerPlaidApi {
   let i = 0;
   return {
+    itemRemove: overrides.itemRemove ?? (async () => {}),
     getAccounts: overrides.getAccounts ?? (async () => [account('acc_1')]),
     syncTransactions:
       overrides.syncTransactions ??

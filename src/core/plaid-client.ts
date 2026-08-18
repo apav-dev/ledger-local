@@ -7,6 +7,7 @@ import {
   type AccountBase,
   type AccountsGetResponse,
   type ItemPublicTokenExchangeResponse,
+  type ItemRemoveResponse,
   type LinkTokenCreateRequest,
   type LinkTokenCreateResponse,
   type LinkTokenGetResponse,
@@ -104,10 +105,32 @@ export function isProductNotReady(error: unknown): boolean {
   return error instanceof PlaidApiError && error.errorCode === 'PRODUCT_NOT_READY';
 }
 
+/**
+ * Plaid no longer knows this Item. Removal is the one operation for which this
+ * is success rather than failure — there is nothing left to delete upstream.
+ */
+export function isItemNotFound(error: unknown): boolean {
+  return error instanceof PlaidApiError && error.errorCode === 'ITEM_NOT_FOUND';
+}
+
+/**
+ * Plaid's maximum, and the only safe default.
+ *
+ * `days_requested` fixes how much history Plaid pulls from the institution when
+ * the Item is created. It cannot be raised afterwards — per Plaid, recovering
+ * requires `/item/remove` and a fresh trip through Link, which also costs
+ * another Item slot. Requesting less than the maximum is therefore a permanent,
+ * silent data ceiling, while requesting the maximum only costs a slower first
+ * historical pull.
+ */
+export const MAX_DAYS_REQUESTED = 730;
+
 export interface CreateLinkTokenOpts {
   /** Set to re-link an existing Item through update mode instead of creating a new one. */
   accessToken?: string | undefined;
   redirectUri?: string | undefined;
+  /** Days of history to pull on Item creation. Ignored in update mode. */
+  daysRequested?: number | undefined;
 }
 
 export interface LinkTokenResult {
@@ -130,12 +153,27 @@ export interface LedgerPlaidApi {
   createLinkToken(opts: CreateLinkTokenOpts): Promise<LinkTokenResult>;
   getLinkSession(linkToken: string): Promise<LinkTokenGetResponse>;
   exchangePublicToken(publicToken: string): Promise<{ accessToken: string; itemId: string }>;
+  /** Deletes the Item at Plaid, freeing its slot and invalidating its access token. */
+  itemRemove(accessToken: string): Promise<void>;
 }
 
 const RATE_LIMIT_DELAY_MS = 2_000;
-const PRODUCT_NOT_READY_DELAY_MS = 3_000;
-/** Total attempts, not retries. Bounded so no call can spin indefinitely. */
-const MAX_ATTEMPTS = 4;
+/** Total rate-limit attempts, not retries. A rate limit clears quickly or it does not. */
+const RATE_LIMIT_MAX_ATTEMPTS = 4;
+
+/**
+ * PRODUCT_NOT_READY is a different animal from a rate limit: it means Plaid is
+ * still pulling history from the institution. With two years requested on an
+ * active account that takes minutes, so this is a poll against a wall-clock
+ * budget rather than a handful of quick retries. Backoff starts short — a small
+ * Item is ready in seconds — and caps so the poll stays responsive.
+ */
+const PRODUCT_NOT_READY_BASE_DELAY_MS = 3_000;
+const PRODUCT_NOT_READY_MAX_DELAY_MS = 15_000;
+const PRODUCT_NOT_READY_BUDGET_MS = 5 * 60_000;
+
+/** Hard backstop across every retry category, so no call can spin indefinitely. */
+const MAX_TOTAL_ATTEMPTS = 64;
 
 /**
  * The subset of PlaidApi this client uses. `PlaidApi` satisfies it structurally
@@ -154,6 +192,7 @@ export interface PlaidSdk {
   itemPublicTokenExchange(req: {
     public_token: string;
   }): Promise<{ data: ItemPublicTokenExchangeResponse }>;
+  itemRemove(req: { access_token: string }): Promise<{ data: ItemRemoveResponse }>;
 }
 
 export function sdkFromConfig(
@@ -176,17 +215,24 @@ export class PlaidClient implements LedgerPlaidApi {
   readonly #api: PlaidSdk;
   readonly #clientName: string;
   readonly #sleep: (ms: number) => Promise<void>;
+  readonly #now: () => number;
+  readonly #productNotReadyBudgetMs: number;
 
   constructor(
     cfg: Pick<LedgerConfig, 'clientId' | 'secret' | 'environment'>,
     opts: {
       sleep?: (ms: number) => Promise<void>;
+      /** Injected so the poll budget is testable without real elapsed time. */
+      now?: () => number;
+      productNotReadyBudgetMs?: number;
       clientName?: string;
       /** Inject a stub in tests. Defaults to a real SDK bound to cfg. */
       sdk?: PlaidSdk;
     } = {},
   ) {
     this.#sleep = opts.sleep ?? (ms => new Promise(r => setTimeout(r, ms)));
+    this.#now = opts.now ?? Date.now;
+    this.#productNotReadyBudgetMs = opts.productNotReadyBudgetMs ?? PRODUCT_NOT_READY_BUDGET_MS;
     this.#clientName = opts.clientName ?? 'ledger-local';
     this.#api = opts.sdk ?? sdkFromConfig(cfg);
   }
@@ -195,24 +241,51 @@ export class PlaidClient implements LedgerPlaidApi {
    * Single funnel for every Plaid call: normalizes errors and applies the retry
    * policy. Fixed-bound loop rather than recursion so the worst case is
    * provable from the constants above.
+   *
+   * The two retryable conditions get separate budgets because they mean
+   * different things. A rate limit is a handful of quick retries.
+   * PRODUCT_NOT_READY is a poll against work Plaid is still doing, and giving up
+   * on it after seconds is what made the first sync after linking fail.
    */
   async #call<T>(label: string, fn: () => Promise<{ data: T }>): Promise<T> {
+    const start = this.#now();
+    let rateLimitAttempts = 0;
+    let notReadyAttempts = 0;
     let lastError: PlaidApiError | undefined;
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+
+    for (let attempt = 0; attempt < MAX_TOTAL_ATTEMPTS; attempt++) {
       try {
         return (await fn()).data;
       } catch (cause) {
         const error = toPlaidApiError(cause, label);
         lastError = error;
-        const retryable = isRateLimited(error) || isProductNotReady(error);
-        if (!retryable || attempt === MAX_ATTEMPTS) throw error;
-        await this.#sleep(
-          isRateLimited(error) ? RATE_LIMIT_DELAY_MS : PRODUCT_NOT_READY_DELAY_MS * attempt,
-        );
+
+        if (isRateLimited(error)) {
+          rateLimitAttempts += 1;
+          if (rateLimitAttempts >= RATE_LIMIT_MAX_ATTEMPTS) throw error;
+          await this.#sleep(RATE_LIMIT_DELAY_MS);
+          continue;
+        }
+
+        if (isProductNotReady(error)) {
+          // Budgeted on elapsed time rather than attempt count, so the total
+          // wait does not change when the backoff curve does. The original
+          // error is rethrown so callers can still classify it.
+          if (this.#now() - start >= this.#productNotReadyBudgetMs) throw error;
+          notReadyAttempts += 1;
+          await this.#sleep(
+            Math.min(
+              PRODUCT_NOT_READY_MAX_DELAY_MS,
+              PRODUCT_NOT_READY_BASE_DELAY_MS * notReadyAttempts,
+            ),
+          );
+          continue;
+        }
+
+        throw error;
       }
     }
-    // Unreachable: the loop either returns or throws. Present so the function
-    // has no implicit undefined return path.
+    // Reached only if the backstop trips before either budget does.
     throw lastError ?? new PlaidApiError(`${label}: retry loop exhausted`, null, null, null);
   }
 
@@ -246,8 +319,14 @@ export class PlaidClient implements LedgerPlaidApi {
         country_codes: [CountryCode.Us],
         user: { client_user_id: 'ledger-local-user' },
         // Update mode reuses the existing Item; products must be omitted then.
+        // So must `transactions`: the Item's history depth is already fixed, and
+        // Plaid documents the field as having no effect once Transactions has
+        // been added to an Item.
         ...(opts.accessToken === undefined
-          ? { products: [Products.Transactions] }
+          ? {
+              products: [Products.Transactions],
+              transactions: { days_requested: opts.daysRequested ?? MAX_DAYS_REQUESTED },
+            }
           : { access_token: opts.accessToken }),
         ...(opts.redirectUri === undefined ? {} : { redirect_uri: opts.redirectUri }),
         hosted_link: {},
@@ -263,6 +342,17 @@ export class PlaidClient implements LedgerPlaidApi {
     return this.#call('/item/public_token/exchange', () =>
       this.#api.itemPublicTokenExchange({ public_token: publicToken }),
     ).then(r => ({ accessToken: r.access_token, itemId: r.item_id }));
+  }
+
+  /**
+   * Irreversible at Plaid. The access token stops working immediately and the
+   * Item's slot is freed; recovering the connection means a fresh trip through
+   * Link, which creates a new Item with a new id.
+   */
+  itemRemove(accessToken: string): Promise<void> {
+    return this.#call('/item/remove', () =>
+      this.#api.itemRemove({ access_token: accessToken }),
+    ).then(() => undefined);
   }
 }
 

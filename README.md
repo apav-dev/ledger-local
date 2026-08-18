@@ -76,6 +76,7 @@ ledger init [--force]             first-run setup (interactive)
 ledger auth                       link a bank (browser)
 ledger auth status                linked institutions, item ids, sync state
 ledger auth repair <item_id>      re-authenticate an existing bank
+ledger item remove <item_id>      permanently delete a bank connection
 ledger sync [--account|--item id] refresh from Plaid
 ledger accounts                   balances (local)
 ledger transactions [filters]     query (local)
@@ -98,6 +99,54 @@ When Plaid returns `ITEM_LOGIN_REQUIRED`, the connection needs re-authentication
 `ledger auth repair <item_id>` uses Link update mode, which reuses the existing
 Item and preserves its sync cursor. Running plain `ledger auth` instead would
 create a **second** Item for the same bank and consume another of your 10 slots.
+
+## Transaction history depth
+
+`ledger auth` requests **730 days** — Plaid's maximum. This is set once, when the
+Item is created, and Plaid does not allow raising it afterwards:
+
+> The maximum amount of transaction history to request on an Item cannot be
+> updated if Transactions has already been added to the Item.
+
+So the depth is a permanent property of each connection. Anything older than two
+years is not available through Plaid at any setting; it stays with your bank.
+
+Fetching older history later with `/transactions/get` does **not** work around
+this. `days_requested` controls what Plaid pulls from the institution and stores,
+not what it returns to you — a wider date range just reads the same 90 or 730 day
+window Plaid actually ingested.
+
+If a connection does end up with too little history, the only fix is
+`ledger item remove <item_id>` followed by a fresh `ledger auth`. That creates a
+new Item with a new id and re-pulls from scratch.
+
+### The first sync after linking may not finish immediately
+
+Plaid assembles the historical pull in the background, and two years on an active
+account takes minutes. `ledger auth` polls for up to 5 minutes; past that it
+reports a sync failure even though the bank is linked correctly.
+
+**Run `ledger sync` a few minutes later — not `ledger auth`.** Re-running `auth`
+creates a second Item for the same bank and consumes another of your 10 slots.
+The cursor is incremental, so a later `sync` picks up everything.
+
+## Removing a connection
+
+```
+ledger item remove <item_id> [--yes]
+```
+
+Removes the Item at Plaid, then deletes its accounts and transactions locally.
+Irreversible on both sides: the access token stops working immediately, and
+reconnecting produces a new Item with a new id.
+
+The order matters. The access token is the only way to remove an Item and it
+lives in the row being deleted, so removal happens at Plaid first. If Plaid
+refuses, local data is left untouched and the command can be retried — otherwise
+the Item would be stranded upstream, still occupying a slot with no way to reach
+it.
+
+Requires a confirmation prompt unless `--yes` is passed.
 
 ## Amount sign convention
 

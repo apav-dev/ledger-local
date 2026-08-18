@@ -265,6 +265,36 @@ export function setItemCursor(db: Db, itemId: string, cursor: string): void {
   db.prepare('UPDATE items SET cursor = ? WHERE id = ?').run(cursor, itemId);
 }
 
+export interface RemovedItemCounts {
+  accounts: number;
+  transactions: number;
+}
+
+/**
+ * Deletes an Item and everything hanging off it, in one transaction.
+ *
+ * Order is forced by the foreign keys: transactions reference accounts, which
+ * reference items. Deleting an item first aborts mid-cascade with rows already
+ * gone, which is why this is a single transaction rather than three statements.
+ */
+export function removeItem(db: Db, itemId: string): RemovedItemCounts {
+  const run = db.transaction((): RemovedItemCounts => {
+    const accountIds = listAccountIdsForItem(db, itemId);
+    let transactions = 0;
+    for (const batch of chunk(accountIds, MAX_BOUND_PARAMS)) {
+      if (batch.length === 0) continue;
+      const placeholders = batch.map(() => '?').join(',');
+      transactions += db
+        .prepare(`DELETE FROM transactions WHERE account_id IN (${placeholders})`)
+        .run(...batch).changes;
+    }
+    const accounts = db.prepare('DELETE FROM accounts WHERE item_id = ?').run(itemId).changes;
+    db.prepare('DELETE FROM items WHERE id = ?').run(itemId);
+    return { accounts, transactions };
+  });
+  return run();
+}
+
 /** Resolves an account to its owning Item, since Plaid syncs per Item. */
 export function itemIdForAccount(db: Db, accountId: string): string | undefined {
   const row = db.prepare('SELECT item_id FROM accounts WHERE id = ?').get(accountId) as

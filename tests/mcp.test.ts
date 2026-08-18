@@ -16,6 +16,7 @@ const cfg: LedgerConfig = {
 };
 
 const noApi: LedgerPlaidApi = {
+  itemRemove: async () => {},
   getAccounts: async () => [],
   syncTransactions: async () => ({
     accounts: [],

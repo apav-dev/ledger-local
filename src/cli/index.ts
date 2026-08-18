@@ -3,7 +3,8 @@ import { exec } from 'node:child_process';
 import { Command } from 'commander';
 import { linkNewItem, repairItem, LinkError } from '../auth/link.js';
 import { ConfigError, loadConfig, type LedgerConfig } from '../core/config.js';
-import { openDb, type Db } from '../core/db.js';
+import { countTransactions, listAccountIdsForItem, openDb, type Db } from '../core/db.js';
+import { removeLinkedItem } from '../core/items.js';
 import {
   authStatus,
   listAccounts,
@@ -27,6 +28,18 @@ import { formatTable, money } from './format.js';
 const EXIT_GENERAL = 1;
 const EXIT_CONFIG = 2;
 const EXIT_REAUTH = 3;
+
+/**
+ * Shown when the sync that runs immediately after linking fails. Without it the
+ * obvious next move is to re-run `auth`, which silently creates a SECOND Item
+ * for the same bank and spends another of the ten slots.
+ */
+const POST_LINK_SYNC_HINT =
+  'The bank is linked — that part succeeded. Plaid is most likely still assembling the\n' +
+  'transaction history, which takes several minutes when two years are requested.\n' +
+  'Run `ledger sync` in a few minutes to finish the backfill.\n' +
+  'Do NOT run `ledger auth` again: that creates a second connection to the same bank\n' +
+  'and consumes another of your 10 Item slots.';
 
 const REAUTH_HINT =
   'Plaid rejected a stored access token (ITEM_LOGIN_REQUIRED).\n' +
@@ -114,7 +127,14 @@ async function linkAndSync(cfg: LedgerConfig, db: Db, json: boolean): Promise<vo
     report: message => process.stdout.write(message + '\n'),
   });
   process.stdout.write(`Linked ${institution} (${itemId}). Running initial sync…\n`);
-  printSyncResults(await syncAll(db, api, { itemId }), json);
+  const results = await syncAll(db, api, { itemId });
+  printSyncResults(results, json);
+
+  // A reauth failure has its own hint; anything else right after linking is
+  // almost always an unfinished historical pull.
+  if (results.some(r => !r.ok && r.needsReauth !== true)) {
+    process.stderr.write(POST_LINK_SYNC_HINT + '\n');
+  }
 }
 
 program
@@ -132,7 +152,12 @@ program
       const result = await runInit({
         // Lazy: the TTY requirement should not mask a "config already exists"
         // failure, which runInit checks first.
-        makePrompter: () => (prompter = createTtyPrompter()),
+        makePrompter: () =>
+          (prompter = createTtyPrompter({
+            nonTtyHint:
+              'Run it directly in a shell, or write config.json by hand — see the Setup ' +
+              'section of the README.',
+          })),
         openUrl: openInBrowser,
         write: message => process.stdout.write(message + '\n'),
         // Built from the pasted values, not from a config file — nothing is on
@@ -155,6 +180,54 @@ program
       prompter?.close();
     }
   });
+
+const item = program.command('item').description('manage linked bank connections');
+
+item
+  .command('remove <itemId>')
+  .description('permanently delete a bank connection, at Plaid and locally')
+  .option('--yes', 'skip the confirmation prompt')
+  .action(
+    withCtx(program, async ({ cfg, db, json }, itemId: string, opts: { yes?: boolean }) => {
+      const accountIds = listAccountIdsForItem(db, itemId);
+      const txnCount = accountIds.reduce((sum, id) => sum + countTransactions(db, id), 0);
+
+      if (opts.yes !== true) {
+        // Irreversible on both sides: Plaid invalidates the access token, and
+        // reconnecting means a brand-new Item with a new id and a fresh
+        // historical pull. Never proceed without an explicit yes.
+        const prompter = createTtyPrompter({
+          nonTtyHint: 'Run it directly in a shell, or pass --yes to skip the confirmation.',
+        });
+        try {
+          const confirmed = await prompter.confirm(
+            `Permanently remove item ${itemId} (${accountIds.length} accounts, ` +
+              `${txnCount} transactions)? This cannot be undone.`,
+            false,
+          );
+          if (!confirmed) {
+            process.stdout.write('Cancelled. Nothing was removed.\n');
+            return;
+          }
+        } finally {
+          prompter.close();
+        }
+      }
+
+      const removed = await removeLinkedItem(db, clientFromConfig(cfg), itemId);
+      if (json) {
+        process.stdout.write(JSON.stringify(removed, null, 2) + '\n');
+        return;
+      }
+      process.stdout.write(
+        `Removed ${removed.institution} (${removed.itemId}): ` +
+          `${removed.accounts} accounts, ${removed.transactions} transactions.\n` +
+          (removed.alreadyGoneAtPlaid
+            ? 'Plaid had already dropped this Item; only local rows were cleaned up.\n'
+            : 'The Item slot is free again.\n'),
+      );
+    }),
+  );
 
 const auth = program.command('auth').description('link a bank via Plaid Hosted Link');
 

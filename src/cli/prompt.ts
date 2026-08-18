@@ -6,9 +6,9 @@ export class PromptError extends Error {
 }
 
 /**
- * The interactive surface `ledger init` depends on. Injected rather than called
- * directly so tests drive the flow without a terminal, the same way `link.ts`
- * takes `openUrl`.
+ * The interactive surface `ledger init` and `ledger item remove` depend on.
+ * Injected rather than called directly so tests drive the flow without a
+ * terminal, the same way `link.ts` takes `openUrl`.
  */
 export interface Prompter {
   /** Presents a numbered list; accepts a name or a 1-based index. */
@@ -58,9 +58,9 @@ const MAX_ATTEMPTS = 5;
 /**
  * Swallows echo while a secret is being typed.
  *
- * readline writes the prompt synchronously inside `question()`, so muting on the
- * line after that call hides the typed characters while leaving the prompt
- * itself visible.
+ * Only readline's own echo passes through here. Callers write the secret's
+ * prompt directly to the sink before muting, because readline does not emit the
+ * query synchronously — muting around `question()` hid the prompt too.
  */
 class MutableOutput extends Writable {
   muted = false;
@@ -85,14 +85,20 @@ class MutableOutput extends Writable {
 }
 
 const CLOSED_MESSAGE =
-  'Input closed before the prompt was answered. Nothing was written. ' +
-  'Re-run `ledger init` in an interactive shell.';
+  'Input closed before the prompt was answered. Nothing was changed. ' +
+  'Re-run the command in an interactive shell.';
 
 export interface TtyPrompterOpts {
   /** Injected so the non-TTY guard is testable without detaching a terminal. */
   isTTY?: boolean | undefined;
   input?: (Readable & { isTTY?: boolean }) | undefined;
   output?: NodeJS.WritableStream | undefined;
+  /**
+   * Appended to the non-TTY error. Supplied by the caller because the way out
+   * differs per command — `init` wants the hand-written config, `item remove`
+   * wants --yes — and generic advice for the wrong command is worse than none.
+   */
+  nonTtyHint?: string | undefined;
 }
 
 export function createTtyPrompter(opts: TtyPrompterOpts = {}): Prompter {
@@ -100,10 +106,8 @@ export function createTtyPrompter(opts: TtyPrompterOpts = {}): Prompter {
   const sink = opts.output ?? process.stdout;
   const isTTY = opts.isTTY ?? input.isTTY === true;
   if (!isTTY) {
-    throw new PromptError(
-      'This command needs an interactive terminal. Run it directly in a shell, or write ' +
-        'config.json by hand — see the Setup section of the README.',
-    );
+    const hint = opts.nonTtyHint ?? 'Run it directly in a shell.';
+    throw new PromptError(`This command needs an interactive terminal. ${hint}`);
   }
 
   const output = new MutableOutput(sink);

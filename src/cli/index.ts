@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { exec } from 'node:child_process';
 import { Command } from 'commander';
-import { linkNewItem, repairItem, LinkError } from '../auth/link.js';
+import { linkNewItem, repairItem, upgradeConsent, LinkError } from '../auth/link.js';
 import { ConfigError, loadConfig, type LedgerConfig } from '../core/config.js';
 import { countTransactions, listAccountIdsForItem, openDb, type Db } from '../core/db.js';
 import { removeLinkedItem } from '../core/items.js';
@@ -110,9 +110,21 @@ function printSyncResults(results: AccountSyncResult[], json: boolean): void {
   }
 }
 
+/**
+ * Opens a URL in the user's browser, best-effort.
+ *
+ * Detached so a slow browser launch cannot hold the CLI open, which also means
+ * failures are invisible here — every caller prints the URL first, so a headless
+ * or unsupported host degrades to "click this link" rather than to nothing.
+ */
 function openInBrowser(url: string): void {
-  // Detached so a slow browser launch cannot hold the CLI open.
-  exec(`open ${JSON.stringify(url)}`);
+  const opener =
+    process.platform === 'darwin'
+      ? 'open'
+      : process.platform === 'win32'
+        ? 'start ""'
+        : 'xdg-open';
+  exec(`${opener} ${JSON.stringify(url)}`);
 }
 
 const program = new Command()
@@ -253,8 +265,13 @@ auth
               institution: i.institution,
               accounts: i.accountCount,
               synced: i.synced ? 'yes' : 'never',
+              consent: i.consentUpToDate ? 'current' : 'needs upgrade',
             })),
           ) +
+          (status.items.some(i => !i.consentUpToDate)
+            ? '\nSome banks predate the current product consent set. Run `ledger auth consent`\n' +
+              'to grant it — update mode, so no duplicate Item and no slot consumed.\n'
+            : '') +
           '\n',
       );
     }),
@@ -272,6 +289,49 @@ auth
       });
       process.stdout.write(`Re-authenticated ${institution}. Syncing…\n`);
       printSyncResults(await syncAll(db, api, { itemId }), json);
+    }),
+  );
+
+auth
+  .command('consent [itemId]')
+  .description(
+    'grant this build\'s full product consent to a linked bank (Link update mode; ' +
+      'does not create a duplicate or cost an Item slot)',
+  )
+  .action(
+    withCtx(program, async ({ db, cfg, json }, itemId?: string) => {
+      const api = clientFromConfig(cfg);
+      const status = authStatus(db, cfg);
+      // With no id, upgrade only what needs it. Every upgrade is a browser
+      // round-trip, so silently re-running current Items would be rude.
+      const targets =
+        itemId === undefined
+          ? status.items.filter(i => !i.consentUpToDate).map(i => i.id)
+          : [itemId];
+
+      if (targets.length === 0) {
+        const message = 'Every linked bank already has full consent. Nothing to do.';
+        process.stdout.write(json ? JSON.stringify({ upgraded: [], message }) + '\n' : message + '\n');
+        return;
+      }
+
+      const upgraded: Array<{ itemId: string; institution: string; consented: string[] }> = [];
+      for (const target of targets) {
+        process.stdout.write(`Upgrading consent for ${target}…\n`);
+        upgraded.push(await upgradeConsent(db, api, target, {
+          openUrl: openInBrowser,
+          report: message => process.stdout.write(message + '\n'),
+        }));
+      }
+
+      if (json) {
+        process.stdout.write(JSON.stringify({ upgraded }, null, 2) + '\n');
+        return;
+      }
+      for (const u of upgraded) {
+        process.stdout.write(`Consent updated for ${u.institution} (${u.itemId}): ` +
+          `${u.consented.join(', ')}\n`);
+      }
     }),
   );
 

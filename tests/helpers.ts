@@ -55,6 +55,7 @@ export function seedDb(): Db {
     institution: 'Chase',
     institution_id: 'ins_56',
     created_at: 1,
+    consented_products: null,
   });
   setItemCursor(db, 'item_1', 'cursor_1');
   upsertAccount(db, {

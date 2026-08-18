@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import type { LinkTokenCreateRequest } from 'plaid';
 import {
+  CONSENTED_PRODUCTS,
   PlaidApiError,
   PlaidClient,
   isProductNotReady,
@@ -368,5 +370,67 @@ describe('transaction history depth', () => {
     const { client, seen } = linkTokenSpy();
     await client.createLinkToken({ accessToken: 'access-existing' });
     expect(seen()).not.toHaveProperty('transactions');
+  });
+});
+
+describe('additional_consented_products', () => {
+  it('sends the consent list when creating a new Item', async () => {
+    const calls: LinkTokenCreateRequest[] = [];
+    const client = clientWithStub(
+      {
+        linkTokenCreate: async (req: LinkTokenCreateRequest) => {
+          calls.push(req);
+          return { data: { link_token: 'lt', hosted_link_url: 'https://h', request_id: 'r' } };
+        },
+      },
+      [],
+    );
+
+    await client.createLinkToken({ additionalConsentedProducts: CONSENTED_PRODUCTS });
+
+    expect(calls[0]?.additional_consented_products).toEqual([...CONSENTED_PRODUCTS]);
+    expect(calls[0]?.products).toEqual(['transactions']);
+  });
+
+  it('sends the consent list in update mode, without products', async () => {
+    const calls: LinkTokenCreateRequest[] = [];
+    const client = clientWithStub(
+      {
+        linkTokenCreate: async (req: LinkTokenCreateRequest) => {
+          calls.push(req);
+          return { data: { link_token: 'lt', hosted_link_url: 'https://h', request_id: 'r' } };
+        },
+      },
+      [],
+    );
+
+    await client.createLinkToken({
+      accessToken: 'access-sandbox-tok',
+      additionalConsentedProducts: CONSENTED_PRODUCTS,
+    });
+
+    expect(calls[0]?.access_token).toBe('access-sandbox-tok');
+    expect(calls[0]?.additional_consented_products).toEqual([...CONSENTED_PRODUCTS]);
+    // Update mode must not resend products: the Item's product set and its
+    // history depth are already fixed.
+    expect(calls[0]?.products).toBeUndefined();
+    expect(calls[0]?.transactions).toBeUndefined();
+  });
+
+  it('omits the field entirely when no consent list is given', async () => {
+    const calls: LinkTokenCreateRequest[] = [];
+    const client = clientWithStub(
+      {
+        linkTokenCreate: async (req: LinkTokenCreateRequest) => {
+          calls.push(req);
+          return { data: { link_token: 'lt', hosted_link_url: 'https://h', request_id: 'r' } };
+        },
+      },
+      [],
+    );
+
+    await client.createLinkToken({});
+
+    expect('additional_consented_products' in (calls[0] ?? {})).toBe(false);
   });
 });

@@ -1,8 +1,26 @@
 import type { LinkTokenGetResponse, LinkTokenGetSessionsResponse } from 'plaid';
 import { describe, expect, it } from 'vitest';
-import { LinkError, linkNewItem, readTerminalSession, repairItem } from '../src/auth/link.js';
-import { getItem, listItems, openDb, setItemCursor, upsertItem, type Db } from '../src/core/db.js';
-import type { LedgerPlaidApi } from '../src/core/plaid-client.js';
+import {
+  LinkError,
+  linkNewItem,
+  readTerminalSession,
+  repairItem,
+  upgradeConsent,
+} from '../src/auth/link.js';
+import {
+  getItem,
+  itemConsent,
+  listItems,
+  openDb,
+  setItemCursor,
+  upsertItem,
+  type Db,
+} from '../src/core/db.js';
+import {
+  CONSENTED_PRODUCTS,
+  type CreateLinkTokenOpts,
+  type LedgerPlaidApi,
+} from '../src/core/plaid-client.js';
 
 function session(over: Partial<LinkTokenGetSessionsResponse> = {}): LinkTokenGetSessionsResponse {
   return { link_session_id: 'sess_1', ...over } as LinkTokenGetSessionsResponse;
@@ -89,6 +107,7 @@ function dbWithItem(): Db {
     institution: 'Chase',
     institution_id: 'ins_56',
     created_at: 1,
+    consented_products: null,
   });
   return db;
 }
@@ -280,5 +299,83 @@ describe('repairItem', () => {
       linkResponse([session({ finished_at: 'x', exit: { error: null, metadata: null } })]),
     ]);
     await expect(repairItem(db, api, 'item_1', RUN)).rejects.toThrow(LinkError);
+  });
+});
+
+describe('consent', () => {
+  it('requests the consent set when linking a new item, and records it', async () => {
+    const db = openDb(':memory:', 'sandbox');
+    const seen: CreateLinkTokenOpts[] = [];
+    const api = fakeApi([linkResponse([successSession()])], {
+      createLinkToken: async opts => {
+        seen.push(opts);
+        return { linkToken: 'lt', hostedLinkUrl: 'https://hosted' };
+      },
+    });
+
+    await linkNewItem(db, api, RUN);
+
+    expect(seen[0]?.additionalConsentedProducts).toEqual([...CONSENTED_PRODUCTS]);
+    // Default stub exchanges into item_1 (not item_new).
+    expect(itemConsent(db, 'item_1')).toEqual([...CONSENTED_PRODUCTS]);
+  });
+
+  it('upgrades consent on an existing item through update mode', async () => {
+    const db = openDb(':memory:', 'sandbox');
+    upsertItem(db, {
+      id: 'item_1', access_token: 'access-tok', institution: 'Chase',
+      institution_id: 'ins_56', created_at: 1, consented_products: null,
+    });
+    setItemCursor(db, 'item_1', 'cursor_keep');
+    const seen: CreateLinkTokenOpts[] = [];
+    const api = fakeApi([linkResponse([session({ finished_at: '2026-08-18T00:00:00Z' })])], {
+      createLinkToken: async opts => {
+        seen.push(opts);
+        return { linkToken: 'lt', hostedLinkUrl: 'https://hosted' };
+      },
+    });
+
+    const result = await upgradeConsent(db, api, 'item_1', RUN);
+
+    expect(seen[0]?.accessToken).toBe('access-tok');
+    expect(seen[0]?.additionalConsentedProducts).toEqual([...CONSENTED_PRODUCTS]);
+    expect(result.consented).toEqual([...CONSENTED_PRODUCTS]);
+    expect(itemConsent(db, 'item_1')).toEqual([...CONSENTED_PRODUCTS]);
+    // Update mode must not disturb sync progress.
+    expect(getItem(db, 'item_1')?.cursor).toBe('cursor_keep');
+  });
+
+  it('refuses to upgrade consent for an unknown item', async () => {
+    const db = openDb(':memory:', 'sandbox');
+
+    await expect(
+      upgradeConsent(db, fakeApi([]), 'nope', RUN),
+    ).rejects.toThrow(/No linked item with id "nope"/);
+  });
+
+  it('leaves consent unrecorded when the link session fails', async () => {
+    const db = openDb(':memory:', 'sandbox');
+    upsertItem(db, {
+      id: 'item_1', access_token: 'access-tok', institution: 'Chase',
+      institution_id: 'ins_56', created_at: 1, consented_products: null,
+    });
+    const api = fakeApi([
+      linkResponse([
+        session({
+          exit: {
+            error: {
+              error_type: 'USER_ERROR' as never,
+              error_code: 'USER_EXIT',
+              error_message: 'closed',
+              display_message: null,
+            },
+            metadata: null,
+          },
+        }),
+      ]),
+    ]);
+
+    await expect(upgradeConsent(db, api, 'item_1', RUN)).rejects.toThrow(LinkError);
+    expect(itemConsent(db, 'item_1')).toEqual([]);
   });
 });

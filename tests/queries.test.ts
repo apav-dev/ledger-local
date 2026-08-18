@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { setAccountSynced, setItemCursor, upsertItem } from '../src/core/db.js';
+import { setAccountSynced, setItemConsent, setItemCursor, upsertItem } from '../src/core/db.js';
 import {
   authStatus,
   listAccounts,
@@ -8,6 +8,7 @@ import {
   spendingSummary,
   unsyncedItemIds,
 } from '../src/core/queries.js';
+import { CONSENTED_PRODUCTS } from '../src/core/plaid-client.js';
 import { NOW, seedDb } from './helpers.js';
 
 describe('listAccounts', () => {
@@ -325,7 +326,14 @@ describe('authStatus', () => {
     const status = authStatus(seedDb(), { environment: 'sandbox' });
     expect(status.environment).toBe('sandbox');
     expect(status.items).toEqual([
-      { id: 'item_1', institution: 'Chase', accountCount: 2, synced: true },
+      {
+        id: 'item_1',
+        institution: 'Chase',
+        accountCount: 2,
+        synced: true,
+        consented: [],
+        consentUpToDate: false,
+      },
     ]);
   });
 
@@ -337,6 +345,7 @@ describe('authStatus', () => {
       institution: 'Amex',
       institution_id: 'ins_10',
       created_at: 2,
+      consented_products: null,
     });
     const status = authStatus(db, { environment: 'production' });
     expect(status.items.find(i => i.id === 'item_2')).toMatchObject({
@@ -350,5 +359,34 @@ describe('authStatus', () => {
     const db = seedDb();
     setItemCursor(db, 'item_1', 'c');
     expect(unsyncedItemIds(db)).toEqual([]);
+  });
+});
+
+describe('authStatus consent', () => {
+  it('reports consent as out of date when the item predates the current set', () => {
+    const db = seedDb();
+
+    const status = authStatus(db, { environment: 'sandbox' });
+
+    expect(status.items[0]?.consented).toEqual([]);
+    expect(status.items[0]?.consentUpToDate).toBe(false);
+  });
+
+  it('reports consent as up to date once every current product is recorded', () => {
+    const db = seedDb();
+    setItemConsent(db, 'item_1', [...CONSENTED_PRODUCTS]);
+
+    const status = authStatus(db, { environment: 'sandbox' });
+
+    expect(status.items[0]?.consentUpToDate).toBe(true);
+  });
+
+  it('treats a superset as up to date', () => {
+    const db = seedDb();
+    setItemConsent(db, 'item_1', [...CONSENTED_PRODUCTS, 'auth']);
+
+    const status = authStatus(db, { environment: 'sandbox' });
+
+    expect(status.items[0]?.consentUpToDate).toBe(true);
   });
 });

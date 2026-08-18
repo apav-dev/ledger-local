@@ -76,6 +76,7 @@ ledger init [--force]             first-run setup (interactive)
 ledger auth                       link a bank (browser)
 ledger auth status                linked institutions, item ids, sync state
 ledger auth repair <item_id>      re-authenticate an existing bank
+ledger auth consent [item_id]     grant full product consent (update mode)
 ledger item remove <item_id>      permanently delete a bank connection
 ledger sync [--account|--item id] refresh from Plaid
 ledger accounts                   balances (local)
@@ -115,6 +116,29 @@ When Plaid returns `ITEM_LOGIN_REQUIRED`, the connection needs re-authentication
 `ledger auth repair <item_id>` uses Link update mode, which reuses the existing
 Item and preserves its sync cursor. Running plain `ledger auth` instead would
 create a **second** Item for the same bank and consume another of your 10 slots.
+
+### Product consent
+
+Linking requests consent for `liabilities` and `investments` in addition to
+`transactions`. Consent is free — Plaid bills a product only once you call its
+endpoints — and it is requested up front so a future feature does not need a
+browser trip per bank to turn on.
+
+(`recurring_transactions` and `transactions_refresh` are in the SDK's `Products`
+enum but Plaid rejects them inside `additional_consented_products`; see the
+Feature 2 probe result in the capability-expansion spec.)
+
+Banks linked before this became the default show `consent: needs upgrade` in
+`ledger auth status`. Fix them with:
+
+```
+ledger auth consent            # every bank that needs it
+ledger auth consent <item_id>  # just one
+```
+
+This uses Link **update mode**, which keeps the existing `access_token`,
+`item_id`, and sync cursor and consumes **no** Item slot. It is a browser
+round-trip, not a re-link.
 
 ## Transaction history depth
 

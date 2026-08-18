@@ -12,6 +12,15 @@ export interface ItemRow {
   /** `/transactions/sync` cursor. NULL means no sync has completed yet. */
   cursor: string | null;
   created_at: number;
+  /**
+   * JSON array of Plaid product names consented for this Item, as accepted at
+   * link or consent-upgrade time. NULL means never recorded.
+   *
+   * Plaid's /item/get is authoritative; this is a local record of what was
+   * requested, kept so a feature can say "run `ledger auth consent`" instead of
+   * surfacing a raw Plaid rejection. Treat a mismatch as this column being stale.
+   */
+  consented_products: string | null;
 }
 
 export type ItemUpsert = Omit<ItemRow, 'cursor'>;
@@ -136,7 +145,7 @@ export interface SyncPage {
  * with a confusing missing-column error — `CREATE TABLE IF NOT EXISTS` silently
  * no-ops against an existing table with different columns.
  */
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -149,7 +158,8 @@ CREATE TABLE IF NOT EXISTS items (
   institution     TEXT NOT NULL,
   institution_id  TEXT,
   cursor          TEXT,
-  created_at      INTEGER NOT NULL
+  created_at      INTEGER NOT NULL,
+  consented_products TEXT
 );
 CREATE TABLE IF NOT EXISTS accounts (
   id                      TEXT PRIMARY KEY,
@@ -340,14 +350,16 @@ export function openDb(dbPath: string, environment: PlaidEnvironment): Db {
 // ---------------------------------------------------------------- items
 
 /**
- * Upserting an Item deliberately leaves `cursor` alone. Re-linking the same
- * Item through update mode must not discard sync progress, or the next sync
- * re-downloads all history.
+ * Upserting an Item deliberately leaves `cursor` and `consented_products`
+ * alone. Re-linking the same Item through update mode must not discard sync
+ * progress or erase consent just established.
  */
 export function upsertItem(db: Db, row: ItemUpsert): void {
   db.prepare(
-    `INSERT INTO items (id, access_token, institution, institution_id, cursor, created_at)
-     VALUES (@id, @access_token, @institution, @institution_id, NULL, @created_at)
+    `INSERT INTO items (id, access_token, institution, institution_id, cursor, created_at,
+                        consented_products)
+     VALUES (@id, @access_token, @institution, @institution_id, NULL, @created_at,
+             @consented_products)
      ON CONFLICT(id) DO UPDATE SET
        access_token   = excluded.access_token,
        institution    = excluded.institution,
@@ -365,6 +377,34 @@ export function getItem(db: Db, itemId: string): ItemRow | undefined {
 
 export function setItemCursor(db: Db, itemId: string, cursor: string): void {
   db.prepare('UPDATE items SET cursor = ? WHERE id = ?').run(cursor, itemId);
+}
+
+/** Records the consent set for an Item. Replaces any previous value. */
+export function setItemConsent(db: Db, itemId: string, products: readonly string[]): void {
+  db.prepare('UPDATE items SET consented_products = ? WHERE id = ?').run(
+    JSON.stringify([...products]),
+    itemId,
+  );
+}
+
+/**
+ * Consented products for an Item, or an empty list.
+ *
+ * Never throws on bad JSON. This column is advisory — it exists to improve an
+ * error message — so a corrupt value must degrade to "unknown", not break a
+ * command that would otherwise work.
+ */
+export function itemConsent(db: Db, itemId: string): string[] {
+  const row = db.prepare('SELECT consented_products FROM items WHERE id = ?').get(itemId) as
+    | { consented_products: string | null }
+    | undefined;
+  if (row?.consented_products == null) return [];
+  try {
+    const parsed: unknown = JSON.parse(row.consented_products);
+    return Array.isArray(parsed) ? parsed.filter((p): p is string => typeof p === 'string') : [];
+  } catch {
+    return [];
+  }
 }
 
 export interface RemovedItemCounts {

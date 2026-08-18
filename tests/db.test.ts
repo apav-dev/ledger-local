@@ -8,6 +8,7 @@ import {
   countTransactions,
   deleteTransactions,
   getItem,
+  itemConsent,
   itemIdForAccount,
   knownTransactionIds,
   listAccountIdsForItem,
@@ -16,6 +17,7 @@ import {
   openDb,
   readMeta,
   setAccountSynced,
+  setItemConsent,
   setItemCursor,
   upsertAccount,
   upsertItem,
@@ -37,6 +39,7 @@ const item: ItemUpsert = {
   institution: 'Chase',
   institution_id: 'ins_56',
   created_at: 1_700_000_000_000,
+  consented_products: null,
 };
 
 const account: AccountUpsert = {
@@ -329,7 +332,7 @@ describe('openDb', () => {
 
   it('stamps a schema version on a fresh database', () => {
     const db = openDb(':memory:', 'sandbox');
-    expect(db.pragma('user_version', { simple: true })).toBe(3);
+    expect(db.pragma('user_version', { simple: true })).toBe(4);
   });
 
   it('reopens its own database without complaint', () => {
@@ -442,7 +445,7 @@ describe('schema v3', () => {
     const db = openDb(':memory:', 'sandbox');
     upsertItem(db, {
       id: 'item_1', access_token: 'tok', institution: 'Chase',
-      institution_id: 'ins_56', created_at: 1,
+      institution_id: 'ins_56', created_at: 1, consented_products: null,
     });
     upsertAccount(db, {
       id: 'acc_1', item_id: 'item_1', name: 'Checking', official_name: null,
@@ -503,5 +506,49 @@ describe('schema v3', () => {
     // once an access token is in there and contradicts the README.
     expect(() => openDb(dbPath, 'sandbox')).toThrow(/re-link/i);
     expect(() => openDb(dbPath, 'sandbox')).not.toThrow(/No data is lost/i);
+  });
+});
+
+describe('item consent', () => {
+  it('round-trips a consent list', () => {
+    const db = openDb(':memory:', 'sandbox');
+    upsertItem(db, {
+      id: 'item_1', access_token: 'tok', institution: 'Chase',
+      institution_id: 'ins_56', created_at: 1, consented_products: null,
+    });
+
+    setItemConsent(db, 'item_1', ['liabilities', 'investments']);
+
+    expect(itemConsent(db, 'item_1')).toEqual(['liabilities', 'investments']);
+  });
+
+  it('reports an empty list when consent was never recorded', () => {
+    const db = openDb(':memory:', 'sandbox');
+    upsertItem(db, {
+      id: 'item_1', access_token: 'tok', institution: 'Chase',
+      institution_id: 'ins_56', created_at: 1, consented_products: null,
+    });
+
+    expect(itemConsent(db, 'item_1')).toEqual([]);
+  });
+
+  it('does not reset consent when an item is re-upserted by update mode', () => {
+    const db = openDb(':memory:', 'sandbox');
+    const row = {
+      id: 'item_1', access_token: 'tok', institution: 'Chase',
+      institution_id: 'ins_56', created_at: 1, consented_products: null,
+    };
+    upsertItem(db, row);
+    setItemConsent(db, 'item_1', ['liabilities']);
+
+    upsertItem(db, { ...row, access_token: 'tok2' });
+
+    expect(itemConsent(db, 'item_1')).toEqual(['liabilities']);
+  });
+
+  it('stamps a fresh database at version 4', () => {
+    const db = openDb(':memory:', 'sandbox');
+
+    expect(db.pragma('user_version', { simple: true })).toBe(4);
   });
 });

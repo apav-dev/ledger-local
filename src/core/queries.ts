@@ -1,6 +1,14 @@
 import type { LedgerConfig } from './config.js';
-import { listAccountRows, listItems, type AccountRow, type Db, type TransactionRow } from './db.js';
+import {
+  itemConsent,
+  listAccountRows,
+  listItems,
+  type AccountRow,
+  type Db,
+  type TransactionRow,
+} from './db.js';
 import { assertDateOrder, resolveDate } from './dates.js';
+import { CONSENTED_PRODUCTS } from './plaid-client.js';
 
 const STALE_MS = 24 * 3600 * 1000;
 
@@ -227,6 +235,14 @@ export interface AuthStatusItem {
   accountCount: number;
   /** False until the first successful sync completes for this Item. */
   synced: boolean;
+  /** Products consented for this Item, as recorded locally at link time. */
+  consented: string[];
+  /**
+   * False when this Item lacks consent for a product the current build would
+   * request. Adding it needs `ledger auth consent <item_id>` — an update-mode
+   * browser round-trip, not a re-link.
+   */
+  consentUpToDate: boolean;
 }
 
 export function authStatus(
@@ -251,12 +267,19 @@ export function authStatus(
 
   return {
     environment: cfg.environment,
-    items: rows.map(r => ({
-      id: r.id,
-      institution: r.institution,
-      accountCount: r.accountCount,
-      synced: r.cursor !== null,
-    })),
+    items: rows.map(r => {
+      const consented = itemConsent(db, r.id);
+      return {
+        id: r.id,
+        institution: r.institution,
+        accountCount: r.accountCount,
+        synced: r.cursor !== null,
+        consented,
+        // Superset counts as current: an Item consented for more than this build
+        // asks for is not out of date.
+        consentUpToDate: CONSENTED_PRODUCTS.every(p => consented.includes(String(p))),
+      };
+    }),
   };
 }
 

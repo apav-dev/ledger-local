@@ -100,7 +100,14 @@ describe('mcp server', () => {
     };
     expect(data.environment).toBe('sandbox');
     expect(data.items).toEqual([
-      { id: 'item_1', institution: 'Chase', accountCount: 2, synced: true },
+      {
+        id: 'item_1',
+        institution: 'Chase',
+        accountCount: 2,
+        synced: true,
+        consented: [],
+        consentUpToDate: false,
+      },
     ]);
   });
 

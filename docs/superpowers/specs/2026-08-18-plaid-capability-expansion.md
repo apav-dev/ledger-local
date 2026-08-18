@@ -181,6 +181,16 @@ requested and accepted.
 certain request contexts. The plan includes a sandbox probe before the constant
 is committed, and the constant must degrade to the accepted subset.
 
+#### Probe result (sandbox, 2026-08-18)
+
+```
+accepted: liabilities, investments
+rejected: recurring_transactions — /link/token/create: recurring_transactions is not a valid product for this field (INVALID_PRODUCT)
+rejected: transactions_refresh — /link/token/create: transactions_refresh is not a valid product for this field (INVALID_PRODUCT)
+
+Copy the accepted list into CONSENTED_PRODUCTS in src/core/plaid-client.ts.
+```
+
 This feature builds no liabilities or investments reader. It only preserves the
 option cheaply.
 

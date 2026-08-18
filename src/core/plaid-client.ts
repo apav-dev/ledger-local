@@ -125,12 +125,40 @@ export function isItemNotFound(error: unknown): boolean {
  */
 export const MAX_DAYS_REQUESTED = 730;
 
+/**
+ * Products consented at link time but never billed until their endpoints are
+ * called. Plaid: "These products will not be billed until you start using them
+ * by calling the relevant endpoints."
+ *
+ * Consent is requested up front because obtaining it later means sending the
+ * user back through Link in update mode — once per Item, in a browser. Update
+ * mode keeps the access_token, item_id, cursor, and Item slot, so deferring is
+ * cheap in money and expensive in interruptions. This costs nothing.
+ *
+ * This list is exactly what Plaid's sandbox accepted on probe; see
+ * scripts/probe-consent.ts. Membership in the SDK's `Products` enum is not
+ * evidence a name is valid here — the enum is shared across request shapes.
+ *
+ * Rejected by sandbox probe (INVALID_PRODUCT for additional_consented_products):
+ * - recurring_transactions
+ * - transactions_refresh
+ */
+export const CONSENTED_PRODUCTS: readonly Products[] = [
+  Products.Liabilities,
+  Products.Investments,
+];
+
 export interface CreateLinkTokenOpts {
   /** Set to re-link an existing Item through update mode instead of creating a new one. */
   accessToken?: string | undefined;
   redirectUri?: string | undefined;
   /** Days of history to pull on Item creation. Ignored in update mode. */
   daysRequested?: number | undefined;
+  /**
+   * Consent to collect. Valid in both new-Item and update mode — update mode is
+   * the supported way to add consent to an Item that already exists.
+   */
+  additionalConsentedProducts?: readonly Products[] | undefined;
 }
 
 export interface LinkTokenResult {
@@ -328,6 +356,11 @@ export class PlaidClient implements LedgerPlaidApi {
               transactions: { days_requested: opts.daysRequested ?? MAX_DAYS_REQUESTED },
             }
           : { access_token: opts.accessToken }),
+        // Sent in BOTH branches. In update mode this is the entire point of the
+        // call: it is how consent is added to an Item that already exists.
+        ...(opts.additionalConsentedProducts === undefined
+          ? {}
+          : { additional_consented_products: [...opts.additionalConsentedProducts] }),
         ...(opts.redirectUri === undefined ? {} : { redirect_uri: opts.redirectUri }),
         hosted_link: {},
       }),

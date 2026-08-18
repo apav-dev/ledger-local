@@ -1,6 +1,6 @@
-import type { LinkTokenGetSessionsResponse } from 'plaid';
-import { getItem, upsertItem, type Db } from '../core/db.js';
-import type { LedgerPlaidApi } from '../core/plaid-client.js';
+import type { LinkTokenGetSessionsResponse, Products } from 'plaid';
+import { getItem, setItemConsent, upsertItem, type Db } from '../core/db.js';
+import { CONSENTED_PRODUCTS, type LedgerPlaidApi } from '../core/plaid-client.js';
 
 export class LinkError extends Error {
   override readonly name = 'LinkError';
@@ -19,6 +19,11 @@ export interface LinkRunOpts {
   sleep?: ((ms: number) => Promise<void>) | undefined;
   /** Receives progress lines; defaults to silence. */
   report?: ((message: string) => void) | undefined;
+  /**
+   * Consent to request. Defaults to CONSENTED_PRODUCTS. Present as an option
+   * only so tests can assert on the empty case.
+   */
+  consentedProducts?: readonly Products[] | undefined;
 }
 
 interface Terminal {
@@ -99,6 +104,7 @@ async function openHostedLinkAndWait(
   const { linkToken, hostedLinkUrl } = await api.createLinkToken({
     accessToken: opts.accessToken,
     redirectUri: opts.redirectUri,
+    additionalConsentedProducts: opts.consentedProducts ?? CONSENTED_PRODUCTS,
   });
   if (hostedLinkUrl === null) {
     throw new LinkError(
@@ -157,13 +163,20 @@ export async function linkNewItem(
   // /item/get + /institutions/get_by_id round trip is needed.
   const institution = terminal.institutionName ?? 'Unknown institution';
 
+  const consented = opts.consentedProducts ?? CONSENTED_PRODUCTS;
+
   upsertItem(db, {
     id: itemId,
     access_token: accessToken,
     institution,
     institution_id: terminal.institutionId,
     created_at: Date.now(),
+    consented_products: null,
   });
+  // Written after the upsert, not inside it: upsertItem deliberately preserves
+  // cursor and consent on conflict, so a fresh row needs the value set
+  // explicitly. Recorded only once Plaid has accepted the link.
+  setItemConsent(db, itemId, [...consented]);
 
   return { itemId, institution };
 }
@@ -191,4 +204,42 @@ export async function repairItem(
   // Update mode keeps the same access_token and item_id, and upsertItem
   // deliberately preserves the cursor so the next sync stays incremental.
   return { itemId: item.id, institution: item.institution };
+}
+
+export interface ConsentUpgrade extends LinkedItem {
+  consented: string[];
+}
+
+/**
+ * Brings an already-linked Item up to the current consent set through Link
+ * update mode.
+ *
+ * Plaid: "To collect a user's consent for additional products on an existing
+ * Item via the additional_consented_products field of /link/token/create, send
+ * the user through update mode." Update mode keeps the access_token, the
+ * item_id, and the transactions cursor, and consumes no Item slot — so this is
+ * a browser round-trip, not a re-link.
+ *
+ * Consent is recorded only after the session reaches a terminal state without
+ * error. A cancelled session must leave the row untouched, or the local record
+ * would claim consent the user never gave.
+ */
+export async function upgradeConsent(
+  db: Db,
+  api: LedgerPlaidApi,
+  itemId: string,
+  opts: LinkRunOpts,
+): Promise<ConsentUpgrade> {
+  const item = getItem(db, itemId);
+  if (item === undefined) {
+    throw new LinkError(
+      `No linked item with id "${itemId}". Run \`ledger auth status\` to list them.`,
+    );
+  }
+
+  const consented = [...(opts.consentedProducts ?? CONSENTED_PRODUCTS)];
+  await openHostedLinkAndWait(api, { ...opts, accessToken: item.access_token });
+  setItemConsent(db, itemId, consented);
+
+  return { itemId: item.id, institution: item.institution, consented };
 }

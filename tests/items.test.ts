@@ -41,6 +41,7 @@ function seed(): Db {
     institution: 'Chase',
     institution_id: 'ins_1',
     created_at: 1,
+    consented_products: null,
   });
   upsertItem(db, {
     id: 'item_2',
@@ -48,6 +49,7 @@ function seed(): Db {
     institution: 'Ally',
     institution_id: 'ins_2',
     created_at: 2,
+    consented_products: null,
   });
   upsertAccount(db, account('acc_1a', 'item_1'));
   upsertAccount(db, account('acc_1b', 'item_1'));

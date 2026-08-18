@@ -92,6 +92,7 @@ function dbWithItem(): Db {
     institution: 'Chase',
     institution_id: 'ins_56',
     created_at: 1,
+    consented_products: null,
   });
   return db;
 }
@@ -433,6 +434,7 @@ describe('syncAll', () => {
       institution: 'Amex',
       institution_id: 'ins_10',
       created_at: 2,
+      consented_products: null,
     });
     const api = fakeApi({
       getAccounts: async token => {
@@ -506,6 +508,7 @@ describe('syncAll', () => {
       institution: 'Amex',
       institution_id: 'ins_10',
       created_at: 2,
+      consented_products: null,
     });
     const api = fakeApi({
       getAccounts: async token => [account(token === 'tok2' ? 'acc_2' : 'acc_1')],

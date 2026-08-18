@@ -84,7 +84,7 @@ function fakeApi(
 }
 
 function dbWithItem(): Db {
-  const db = openDb(':memory:');
+  const db = openDb(':memory:', 'sandbox');
   upsertItem(db, {
     id: 'item_1',
     access_token: 'access-sandbox-tok',
@@ -389,6 +389,6 @@ describe('syncAll', () => {
   });
 
   it('returns nothing when no items are linked', async () => {
-    expect(await syncAll(openDb(':memory:'), fakeApi())).toEqual([]);
+    expect(await syncAll(openDb(':memory:', 'sandbox'), fakeApi())).toEqual([]);
   });
 });

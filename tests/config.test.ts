@@ -1,8 +1,17 @@
-import { chmodSync, mkdtempSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+  mkdirSync,
+  rmSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ConfigError, loadConfig } from '../src/core/config.js';
+import { ConfigError, configPathFor, loadConfig, writeConfig } from '../src/core/config.js';
 
 let dir: string;
 
@@ -98,5 +107,88 @@ describe('loadConfig', () => {
     const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     loadConfig(makeConfigDir(VALID));
     expect(stderr).not.toHaveBeenCalled();
+  });
+});
+
+describe('configPathFor', () => {
+  it('resolves the same path loadConfig reads', () => {
+    const env = makeConfigDir(VALID);
+    expect(configPathFor(env)).toBe(path.join(env['LEDGER_CONFIG_DIR'] as string, 'config.json'));
+  });
+});
+
+describe('writeConfig', () => {
+  const INPUT = { clientId: 'cid_123', secret: 'sec_456', environment: 'sandbox' } as const;
+
+  it('writes a config loadConfig can read back', () => {
+    const env = makeConfigDir(undefined);
+    const written = writeConfig(INPUT, { env });
+    expect(written).toBe(configPathFor(env));
+
+    const cfg = loadConfig(env);
+    expect(cfg.clientId).toBe('cid_123');
+    expect(cfg.secret).toBe('sec_456');
+    expect(cfg.environment).toBe('sandbox');
+  });
+
+  it('creates the file mode 600 regardless of umask', () => {
+    const env = makeConfigDir(undefined);
+    // A loose umask must not be able to widen a file holding a live API secret.
+    const previous = process.umask(0o000);
+    try {
+      writeConfig(INPUT, { env });
+    } finally {
+      process.umask(previous);
+    }
+    expect(statSync(configPathFor(env)).mode & 0o777).toBe(0o600);
+  });
+
+  it('creates the config directory when it does not exist yet', () => {
+    const env = makeConfigDir(undefined);
+    const nested = path.join(dir, 'brand', 'new');
+    writeConfig(INPUT, { env: { ...env, LEDGER_CONFIG_DIR: nested } });
+    expect(statSync(path.join(nested, 'config.json')).isFile()).toBe(true);
+  });
+
+  it('refuses to clobber an existing config without force', () => {
+    const env = makeConfigDir(VALID);
+    expect(() => writeConfig(INPUT, { env })).toThrow(ConfigError);
+    expect(() => writeConfig(INPUT, { env })).toThrow(/already exists/);
+    // The original must survive an attempted overwrite untouched.
+    expect(readFileSync(configPathFor(env), 'utf8')).toBe(VALID);
+  });
+
+  it('overwrites when force is set', () => {
+    const env = makeConfigDir(VALID);
+    writeConfig({ ...INPUT, clientId: 'cid_new' }, { env, force: true });
+    expect(loadConfig(env).clientId).toBe('cid_new');
+  });
+
+  it('leaves no temp file behind', () => {
+    const env = makeConfigDir(undefined);
+    writeConfig(INPUT, { env });
+    expect(readdirSync(env['LEDGER_CONFIG_DIR'] as string)).toEqual(['config.json']);
+  });
+
+  it('rejects empty credentials before touching the disk', () => {
+    const env = makeConfigDir(undefined);
+    expect(() => writeConfig({ ...INPUT, secret: '' }, { env })).toThrow(ConfigError);
+    expect(readdirSync(env['LEDGER_CONFIG_DIR'] as string)).toEqual([]);
+  });
+
+  it('never puts the secret in a validation error message', () => {
+    const env = makeConfigDir(undefined);
+    try {
+      writeConfig({ ...INPUT, clientId: '' }, { env });
+      expect.unreachable('writeConfig should have thrown');
+    } catch (error) {
+      expect((error as Error).message).not.toContain('sec_456');
+    }
+  });
+
+  it('round-trips production', () => {
+    const env = makeConfigDir(undefined);
+    writeConfig({ ...INPUT, environment: 'production' }, { env });
+    expect(loadConfig(env).environment).toBe('production');
   });
 });

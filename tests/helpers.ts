@@ -16,7 +16,7 @@ export const NOW = Date.UTC(2026, 7, 17); // 2026-08-17
  * leaving the account, NEGATIVE is income. t4 is the only inflow.
  */
 export function seedDb(): Db {
-  const db = openDb(':memory:');
+  const db = openDb(':memory:', 'sandbox');
   upsertItem(db, {
     id: 'item_1',
     access_token: 'access-sandbox-tok',

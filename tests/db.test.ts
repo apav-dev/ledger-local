@@ -14,6 +14,7 @@ import {
   listAccountRows,
   listItems,
   openDb,
+  readMeta,
   setAccountSynced,
   setItemCursor,
   upsertAccount,
@@ -68,7 +69,7 @@ function txn(id: string, over: Partial<TransactionRow> = {}): TransactionRow {
 }
 
 function freshDb() {
-  const db = openDb(':memory:');
+  const db = openDb(':memory:', 'sandbox');
   upsertItem(db, item);
   upsertAccount(db, account);
   return db;
@@ -289,7 +290,7 @@ describe('openDb', () => {
     const dir = mkdtempSync(join(tmpdir(), 'ledger-db-test-'));
     tmpDbDir = dir;
     const dbPath = join(dir, 'test.db');
-    const db = openDb(dbPath);
+    const db = openDb(dbPath, 'sandbox');
     upsertItem(db, item);
     upsertAccount(db, account);
 
@@ -301,21 +302,21 @@ describe('openDb', () => {
   });
 
   it('enforces foreign keys', () => {
-    const db = openDb(':memory:');
+    const db = openDb(':memory:', 'sandbox');
     expect(() => upsertAccount(db, account)).toThrow(/FOREIGN KEY/i);
   });
 
   it('stamps a schema version on a fresh database', () => {
-    const db = openDb(':memory:');
-    expect(db.pragma('user_version', { simple: true })).toBe(1);
+    const db = openDb(':memory:', 'sandbox');
+    expect(db.pragma('user_version', { simple: true })).toBe(2);
   });
 
   it('reopens its own database without complaint', () => {
     const dir = mkdtempSync(join(tmpdir(), 'ledger-db-test-'));
     tmpDbDir = dir;
     const dbPath = join(dir, 'test.db');
-    openDb(dbPath).close();
-    expect(() => openDb(dbPath).close()).not.toThrow();
+    openDb(dbPath, 'sandbox').close();
+    expect(() => openDb(dbPath, 'sandbox').close()).not.toThrow();
   });
 
   it('refuses a pre-versioning database instead of silently mismatching columns', () => {
@@ -329,7 +330,7 @@ describe('openDb', () => {
     legacy.exec('CREATE TABLE transactions (id TEXT PRIMARY KEY, amount REAL)');
     legacy.close(); // user_version stays 0
 
-    expect(() => openDb(dbPath)).toThrow(/older build with an incompatible schema/);
+    expect(() => openDb(dbPath, 'sandbox')).toThrow(/older build with an incompatible schema/);
   });
 
   it('refuses a database written by a newer build', () => {
@@ -340,6 +341,74 @@ describe('openDb', () => {
     future.pragma('user_version = 99');
     future.close();
 
-    expect(() => openDb(dbPath)).toThrow(/schema version 99/);
+    expect(() => openDb(dbPath, 'sandbox')).toThrow(/schema version 99/);
+    expect(() => openDb(dbPath, 'sandbox')).toThrow(/upgrade/);
+  });
+
+  it('tells an older-schema user to delete, not to upgrade', () => {
+    // v1 is BEHIND this build, so the "a newer version wrote this" advice would
+    // be backwards. Direct these users to delete the file instead.
+    const dir = mkdtempSync(join(tmpdir(), 'ledger-db-test-'));
+    tmpDbDir = dir;
+    const dbPath = join(dir, 'v1.db');
+    const old = new Database(dbPath);
+    old.pragma('user_version = 1');
+    old.close();
+
+    expect(() => openDb(dbPath, 'sandbox')).toThrow(/schema version 1/);
+    expect(() => openDb(dbPath, 'sandbox')).toThrow(/[Dd]elete/);
+  });
+});
+
+describe('openDb environment stamping', () => {
+  it('records the environment on a fresh database', () => {
+    const db = openDb(':memory:', 'production');
+    expect(readMeta(db, 'environment')).toBe('production');
+  });
+
+  it('reopens cleanly when the environment matches', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ledger-db-test-'));
+    tmpDbDir = dir;
+    const dbPath = join(dir, 'env.db');
+    openDb(dbPath, 'sandbox').close();
+    expect(() => openDb(dbPath, 'sandbox').close()).not.toThrow();
+  });
+
+  it('refuses to open a sandbox database against production', () => {
+    // The access tokens in a sandbox db are meaningless to the production host.
+    // Without this guard every Plaid call fails with a confusing auth error.
+    const dir = mkdtempSync(join(tmpdir(), 'ledger-db-test-'));
+    tmpDbDir = dir;
+    const dbPath = join(dir, 'mismatch.db');
+    openDb(dbPath, 'sandbox').close();
+
+    expect(() => openDb(dbPath, 'production')).toThrow(/sandbox/);
+    expect(() => openDb(dbPath, 'production')).toThrow(/production/);
+    expect(() => openDb(dbPath, 'production')).toThrow(/LEDGER_DATA_DIR/);
+  });
+
+  it('refuses the reverse mismatch too', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ledger-db-test-'));
+    tmpDbDir = dir;
+    const dbPath = join(dir, 'mismatch2.db');
+    openDb(dbPath, 'production').close();
+
+    expect(() => openDb(dbPath, 'sandbox')).toThrow(/environment/);
+  });
+
+  it('never leaks an access token into the mismatch message', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ledger-db-test-'));
+    tmpDbDir = dir;
+    const dbPath = join(dir, 'tokens.db');
+    const db = openDb(dbPath, 'sandbox');
+    upsertItem(db, item);
+    db.close();
+
+    try {
+      openDb(dbPath, 'production');
+      expect.unreachable('openDb should have thrown on environment mismatch');
+    } catch (error) {
+      expect((error as Error).message).not.toContain(item.access_token);
+    }
   });
 });

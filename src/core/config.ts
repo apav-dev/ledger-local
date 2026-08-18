@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -62,10 +63,89 @@ function warnIfConfigWorldReadable(configPath: string): void {
   }
 }
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): LedgerConfig {
+interface Dirs {
+  configDir: string;
+  dataDir: string;
+  configPath: string;
+}
+
+/**
+ * Single source of truth for where state lives. Both the reader and the writer
+ * go through this, so `ledger init` cannot write a config that `loadConfig`
+ * then fails to find.
+ */
+function resolveDirs(env: NodeJS.ProcessEnv): Dirs {
   const configDir = env['LEDGER_CONFIG_DIR'] ?? path.join(os.homedir(), '.config', 'ledger');
   const dataDir = env['LEDGER_DATA_DIR'] ?? path.join(os.homedir(), '.local', 'share', 'ledger');
-  const configPath = path.join(configDir, 'config.json');
+  return { configDir, dataDir, configPath: path.join(configDir, 'config.json') };
+}
+
+/** Where the config lives, without requiring that it exist yet. */
+export function configPathFor(env: NodeJS.ProcessEnv = process.env): string {
+  return resolveDirs(env).configPath;
+}
+
+export interface ConfigInput {
+  clientId: string;
+  secret: string;
+  environment: PlaidEnvironment;
+}
+
+export interface WriteConfigOpts {
+  /** Overwrite an existing config. Off by default: it destroys live credentials. */
+  force?: boolean | undefined;
+  env?: NodeJS.ProcessEnv | undefined;
+}
+
+/**
+ * Writes config.json at mode 600 and returns its path.
+ *
+ * Written to a temp file in the same directory and renamed into place, so a
+ * partially-written file containing a secret never exists at the final path and
+ * a failed write cannot destroy a working config. The explicit chmod is not
+ * redundant with the `mode` option: `mode` is masked by the process umask,
+ * which would leave the secret group-readable under a permissive umask.
+ */
+export function writeConfig(input: ConfigInput, opts: WriteConfigOpts = {}): string {
+  const { configDir, configPath } = resolveDirs(opts.env ?? process.env);
+
+  // Validate before touching the disk, and through the same schema loadConfig
+  // uses, so a config this function writes can never fail to load.
+  const parsed = ConfigFileSchema.safeParse(input);
+  if (!parsed.success) {
+    throw new ConfigError(`Refusing to write an invalid config: ${parsed.error.message}`);
+  }
+
+  if (opts.force !== true && fs.existsSync(configPath)) {
+    throw new ConfigError(
+      `${configPath} already exists. Re-run with --force to overwrite it, but note that ` +
+        `this replaces the credentials the existing linked banks were created under.`,
+    );
+  }
+
+  fs.mkdirSync(configDir, { recursive: true });
+
+  const body = JSON.stringify(
+    { clientId: parsed.data.clientId, secret: parsed.data.secret, environment: parsed.data.environment },
+    null,
+    2,
+  );
+  // Same directory as the target: rename is only atomic within one filesystem.
+  const tmpPath = path.join(configDir, `.config.json.${crypto.randomUUID()}.tmp`);
+  try {
+    fs.writeFileSync(tmpPath, `${body}\n`, { mode: 0o600 });
+    fs.chmodSync(tmpPath, 0o600);
+    fs.renameSync(tmpPath, configPath);
+  } catch (cause) {
+    fs.rmSync(tmpPath, { force: true });
+    throw new ConfigError(`Could not write ${configPath}`, { cause });
+  }
+
+  return configPath;
+}
+
+export function loadConfig(env: NodeJS.ProcessEnv = process.env): LedgerConfig {
+  const { configDir, dataDir, configPath } = resolveDirs(env);
 
   if (!fs.existsSync(configPath)) {
     throw new ConfigError(`Missing ${configPath}.\n${setupInstructions(configDir)}`);

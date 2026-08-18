@@ -11,8 +11,10 @@ import {
   spendingSummary,
   type SpendingGroupBy,
 } from '../core/queries.js';
-import { clientFromConfig, isReauthRequired } from '../core/plaid-client.js';
+import { PlaidClient, clientFromConfig, isReauthRequired } from '../core/plaid-client.js';
 import { syncAll, type AccountSyncResult } from '../core/sync.js';
+import { runInit } from './init.js';
+import { createTtyPrompter, type Prompter } from './prompt.js';
 // Money is stored as integer cents; --json emits dollars through these views, the
 // same ones the MCP server uses, so the two frontends cannot disagree.
 import {
@@ -42,7 +44,7 @@ function withCtx(program: Command, run: (ctx: Ctx, ...args: never[]) => Promise<
     const json = Boolean(program.opts()['json']);
     try {
       const cfg = loadConfig();
-      const db = openDb(cfg.dbPath);
+      const db = openDb(cfg.dbPath, cfg.environment);
       await run({ cfg, db, json }, ...(args as never[]));
     } catch (error) {
       handleError(error, json);
@@ -104,19 +106,59 @@ const program = new Command()
   .description('Local Plaid financial data: sync to SQLite, query from anywhere')
   .option('--json', 'machine-readable JSON output');
 
+/** Shared by `ledger auth` and the optional link step at the end of `ledger init`. */
+async function linkAndSync(cfg: LedgerConfig, db: Db, json: boolean): Promise<void> {
+  const api = clientFromConfig(cfg);
+  const { itemId, institution } = await linkNewItem(db, api, {
+    openUrl: openInBrowser,
+    report: message => process.stdout.write(message + '\n'),
+  });
+  process.stdout.write(`Linked ${institution} (${itemId}). Running initial sync…\n`);
+  printSyncResults(await syncAll(db, api, { itemId }), json);
+}
+
+program
+  .command('init')
+  .description('first-run setup: pick an environment, verify Plaid keys, write config.json')
+  .option('--force', 'replace an existing config.json (invalidates linked banks)')
+  .action(async (opts: { force?: boolean }) => {
+    const json = Boolean(program.opts()['json']);
+    // init is a conversation, not a query. Refuse --json rather than emit a
+    // half-JSON stream interleaved with prompts.
+    if (json) fail('`ledger init` is interactive and does not support --json.', EXIT_GENERAL, false);
+
+    let prompter: Prompter | undefined;
+    try {
+      const result = await runInit({
+        // Lazy: the TTY requirement should not mask a "config already exists"
+        // failure, which runInit checks first.
+        makePrompter: () => (prompter = createTtyPrompter()),
+        openUrl: openInBrowser,
+        write: message => process.stdout.write(message + '\n'),
+        // Built from the pasted values, not from a config file — nothing is on
+        // disk yet at verification time.
+        makeApi: input => new PlaidClient(input),
+        force: opts.force ?? false,
+      });
+
+      if (!result.linkNow) {
+        process.stdout.write('Next: `ledger auth` to link a bank.\n');
+        return;
+      }
+
+      const cfg = loadConfig();
+      const db = openDb(cfg.dbPath, cfg.environment);
+      await linkAndSync(cfg, db, false);
+    } catch (error) {
+      handleError(error, false);
+    } finally {
+      prompter?.close();
+    }
+  });
+
 const auth = program.command('auth').description('link a bank via Plaid Hosted Link');
 
-auth.action(
-  withCtx(program, async ({ db, cfg, json }) => {
-    const api = clientFromConfig(cfg);
-    const { itemId, institution } = await linkNewItem(db, api, {
-      openUrl: openInBrowser,
-      report: message => process.stdout.write(message + '\n'),
-    });
-    process.stdout.write(`Linked ${institution} (${itemId}). Running initial sync…\n`);
-    printSyncResults(await syncAll(db, api, { itemId }), json);
-  }),
-);
+auth.action(withCtx(program, ({ db, cfg, json }) => linkAndSync(cfg, db, json)));
 
 auth
   .command('status')

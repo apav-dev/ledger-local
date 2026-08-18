@@ -6,7 +6,7 @@ import { clientFromConfig } from '../core/plaid-client.js';
 import { buildMcpServer } from './server.js';
 
 const cfg = loadConfig();
-const db = openDb(cfg.dbPath);
+const db = openDb(cfg.dbPath, cfg.environment);
 const api = clientFromConfig(cfg);
 const server = buildMcpServer({ db, api, cfg });
 await server.connect(new StdioServerTransport());

@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import Database from 'better-sqlite3';
+import type { PlaidEnvironment } from './config.js';
 
 export type Db = Database.Database;
 
@@ -77,9 +78,13 @@ export interface SyncPage {
  * with a confusing missing-column error — `CREATE TABLE IF NOT EXISTS` silently
  * no-ops against an existing table with different columns.
  */
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const SCHEMA = `
+CREATE TABLE IF NOT EXISTS meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS items (
   id              TEXT PRIMARY KEY,
   access_token    TEXT NOT NULL,
@@ -159,18 +164,65 @@ function applySchema(db: Db, dbPath: string): void {
     return;
   }
 
+  if (version > SCHEMA_VERSION) {
+    throw new Error(
+      `${dbPath} has schema version ${version}, but this build expects ${SCHEMA_VERSION}. ` +
+        `A newer version of ledger wrote this database — upgrade instead of downgrading.`,
+    );
+  }
+
   throw new Error(
     `${dbPath} has schema version ${version}, but this build expects ${SCHEMA_VERSION}. ` +
-      `A newer version of ledger wrote this database — upgrade instead of downgrading.`,
+      `It was written by an older build and there are no migrations. Delete the file ` +
+      `(and its -wal/-shm siblings), then run \`ledger auth\` to re-link and re-sync.`,
   );
 }
 
-export function openDb(dbPath: string): Db {
+export function readMeta(db: Db, key: string): string | undefined {
+  const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(key) as
+    | { value: string }
+    | undefined;
+  return row?.value;
+}
+
+function writeMeta(db: Db, key: string, value: string): void {
+  db.prepare(
+    `INSERT INTO meta (key, value) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+  ).run(key, value);
+}
+
+/**
+ * Binds a database file to the Plaid environment that created it.
+ *
+ * Access tokens are environment-scoped: a sandbox token means nothing to the
+ * production host and vice versa. Nothing in the token's text says which it is,
+ * so without this stamp, pointing config.json at the other environment produces
+ * an authentication failure on every Item with no hint at the real cause.
+ */
+function enforceEnvironment(db: Db, dbPath: string, environment: PlaidEnvironment): void {
+  const stamped = readMeta(db, 'environment');
+  if (stamped === undefined) {
+    writeMeta(db, 'environment', environment);
+    return;
+  }
+  if (stamped !== environment) {
+    // Names the two environments and the escape hatch, never the token values.
+    throw new Error(
+      `${dbPath} holds ${stamped} data, but the config selects ${environment}. ` +
+        `Access tokens are not portable between environments. Point LEDGER_DATA_DIR at a ` +
+        `separate directory for ${environment}, or delete this database to start over.`,
+    );
+  }
+}
+
+export function openDb(dbPath: string, environment: PlaidEnvironment): Db {
   const fresh = dbPath !== ':memory:' && !fs.existsSync(dbPath);
   const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   applySchema(db, dbPath);
+  enforceEnvironment(db, dbPath, environment);
   if (fresh) fs.chmodSync(dbPath, 0o600);
   if (dbPath !== ':memory:') {
     // WAL and shm carry the same row data as the main file, so they need the

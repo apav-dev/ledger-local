@@ -9,16 +9,56 @@ or let an agent query it through MCP — reads never hit the Plaid API.
 1. Create a Plaid account at https://dashboard.plaid.com/signup. US/CA signups
    get a **Trial plan**: real production data, auto-approved, up to **10 Items**
    (an Item is one bank connection and can hold many accounts).
-2. Copy your `client_id` and secret from **Dashboard → Developers → Keys**.
-   Start with the Sandbox secret; switch to Production when you want real banks.
-3. Create `~/.config/ledger/config.json`:
-   ```json
-   { "clientId": "...", "secret": "...", "environment": "sandbox" }
-   ```
-4. `chmod 600 ~/.config/ledger/config.json` — it holds a live API secret.
-   The CLI warns on every run if the file is group- or world-readable.
-5. `pnpm install && pnpm build`
-6. Link a bank: `node dist/cli/index.js auth`
+2. `pnpm install && pnpm build`
+3. `node dist/cli/index.js init`
+
+`init` asks which environment you want, opens **Dashboard → Developers → Keys**
+in your browser, takes your `client_id` and secret (the secret is not echoed),
+and verifies them against Plaid before writing anything. It then writes
+`~/.config/ledger/config.json` at mode 600 and offers to link your first bank.
+
+Plaid has no API for fetching developer credentials — they exist only in the
+dashboard — so the paste step cannot be automated.
+
+The verification call is `/link/token/create`, which is the cheapest way to
+prove all three things setup can get wrong at once: the keys are valid, they
+belong to the environment you picked, and Hosted Link is enabled for your
+`client_id`. Nothing is written to disk until it succeeds.
+
+### Writing the config by hand
+
+`init` needs an interactive terminal. Without one, create
+`~/.config/ledger/config.json` yourself:
+
+```json
+{ "clientId": "...", "secret": "...", "environment": "sandbox" }
+```
+
+Then `chmod 600` it — the file holds a live API secret, and the CLI warns on
+every run if it is group- or world-readable.
+
+### Sandbox first
+
+Start with the Sandbox secret. Sandbox is free and unlimited, uses fake banks
+(`user_good` / `pass_good`, MFA `1234`), and exercises the entire path — Hosted
+Link, token exchange, `/transactions/sync`, SQLite. Every Item you link in
+Production permanently consumes one of your 10 Trial slots.
+
+### Sandbox and Production do not mix
+
+Access tokens are environment-scoped: a Sandbox token is meaningless to the
+Production host, and nothing in the token's text says which it is. The database
+records the environment that created it and refuses to open under the other one,
+so flipping `environment` in an existing config fails immediately instead of
+producing an authentication error on every bank.
+
+Keep them in separate directories:
+
+```bash
+export LEDGER_CONFIG_DIR=~/.config/ledger-prod
+export LEDGER_DATA_DIR=~/.local/share/ledger-prod
+node dist/cli/index.js init
+```
 
 `auth` uses Plaid **Hosted Link**: it opens a Plaid-hosted page in your browser
 and polls `/link/token/get` until the session finishes. There is no local web
@@ -32,6 +72,7 @@ server and no redirect URI to configure.
 ## CLI
 
 ```
+ledger init [--force]             first-run setup (interactive)
 ledger auth                       link a bank (browser)
 ledger auth status                linked institutions, item ids, sync state
 ledger auth repair <item_id>      re-authenticate an existing bank
@@ -41,7 +82,12 @@ ledger transactions [filters]     query (local)
 ledger spending --from --to       rollups (local)
 ```
 
-Every command takes `--json`. Reads report staleness (>24h since sync).
+Every command takes `--json` except `init`, which is a conversation rather than a
+query. Reads report staleness (>24h since sync).
+
+`init --force` replaces an existing config and asks for confirmation first.
+Changing credentials invalidates the access tokens your linked banks were
+created under, so this is not a routine operation.
 
 Exit codes: `0` ok, `1` general failure, `2` config problem, `3` a bank needs
 re-authentication.
@@ -83,8 +129,9 @@ and MCP cannot report different numbers.
 ## MCP
 
 Register `dist/mcp/index.js` as a stdio MCP server. Tools: `list_accounts`,
-`list_transactions`, `spending_summary`, `sync`, `auth_status`. Linking and
-repairing a bank are CLI-only — both need a human at a browser.
+`list_transactions`, `spending_summary`, `sync`, `auth_status`. Setup, linking,
+and repairing a bank are CLI-only — all three need a human at a terminal or a
+browser.
 
 ## State
 
@@ -92,10 +139,23 @@ repairing a bank are CLI-only — both need a human at a browser.
 - Database: `~/.local/share/ledger/ledger.db` (chmod 600; contains access tokens)
 - Override with `LEDGER_CONFIG_DIR` / `LEDGER_DATA_DIR`.
 
-The database records its schema version in `PRAGMA user_version`. There are no
-migrations: if a database was written by an incompatible build, the CLI says so
-and asks you to delete the file. Nothing is lost — every row is re-downloadable
-from Plaid.
+**Neither lives in this repo.** Cloning it on another machine gets you the code
+and nothing else — no credentials, no linked banks. Running `ledger init` and
+`ledger auth` there creates a *second* Item for the same bank and consumes
+another of your 10 slots. To move an existing setup, copy both files (and the
+database's `-wal` / `-shm` siblings) and re-apply `chmod 600`. Access tokens are
+bound to your `client_id` and environment, not to a machine, so they keep
+working. Two copies syncing independently will diverge — each carries its own
+cursor and there is no merge.
+
+The database records its schema version in `PRAGMA user_version` and the Plaid
+environment that created it. There are no migrations: a database written by an
+incompatible build, or opened under the wrong environment, is rejected with an
+explanation rather than silently misbehaving.
+
+Deleting the database loses your access tokens, which means re-linking every
+bank and spending Item slots again. Transactions are all re-downloadable; the
+enrollments are not.
 
 ## How sync works
 

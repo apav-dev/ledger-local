@@ -82,7 +82,7 @@ const RUN = {
 };
 
 function dbWithItem(): Db {
-  const db = openDb(':memory:');
+  const db = openDb(':memory:', 'sandbox');
   upsertItem(db, {
     id: 'item_1',
     access_token: 'access-sandbox-old',
@@ -150,7 +150,7 @@ describe('readTerminalSession', () => {
 
 describe('linkNewItem', () => {
   it('exchanges the public token and records the item with a NULL cursor', async () => {
-    const db = openDb(':memory:');
+    const db = openDb(':memory:', 'sandbox');
     const api = fakeApi([linkResponse([successSession()])]);
     const result = await linkNewItem(db, api, RUN);
 
@@ -163,7 +163,7 @@ describe('linkNewItem', () => {
   });
 
   it('polls until the session reaches a terminal state', async () => {
-    const db = openDb(':memory:');
+    const db = openDb(':memory:', 'sandbox');
     const api = fakeApi([
       linkResponse([]),
       linkResponse([session({ started_at: 'x' })]),
@@ -174,21 +174,21 @@ describe('linkNewItem', () => {
   });
 
   it('requests a products-based link token, not update mode', async () => {
-    const db = openDb(':memory:');
+    const db = openDb(':memory:', 'sandbox');
     const api = fakeApi([linkResponse([successSession()])]);
     await linkNewItem(db, api, RUN);
     expect(api.linkTokenRequests).toEqual([{ accessToken: undefined }]);
   });
 
   it('falls back to a placeholder when Plaid omits the institution name', async () => {
-    const db = openDb(':memory:');
+    const db = openDb(':memory:', 'sandbox');
     const api = fakeApi([linkResponse([successSession(null)])]);
     const result = await linkNewItem(db, api, RUN);
     expect(result.institution).toBe('Unknown institution');
   });
 
   it('fails clearly when Hosted Link is not enabled', async () => {
-    const db = openDb(':memory:');
+    const db = openDb(':memory:', 'sandbox');
     const api = fakeApi([], {
       createLinkToken: async () => ({ linkToken: 'l', hostedLinkUrl: null }),
     });
@@ -196,7 +196,7 @@ describe('linkNewItem', () => {
   });
 
   it('times out rather than polling forever', async () => {
-    const db = openDb(':memory:');
+    const db = openDb(':memory:', 'sandbox');
     let polls = 0;
     const api = fakeApi([], {
       getLinkSession: async () => {
@@ -213,7 +213,7 @@ describe('linkNewItem', () => {
   });
 
   it('records nothing when the user cancels', async () => {
-    const db = openDb(':memory:');
+    const db = openDb(':memory:', 'sandbox');
     const api = fakeApi([
       linkResponse([session({ finished_at: 'x', exit: { error: null, metadata: null } })]),
     ]);
@@ -222,7 +222,7 @@ describe('linkNewItem', () => {
   });
 
   it('does not record an item when the exchange fails', async () => {
-    const db = openDb(':memory:');
+    const db = openDb(':memory:', 'sandbox');
     const api = fakeApi([linkResponse([successSession()])], {
       exchangePublicToken: async () => {
         throw new Error('exchange rejected');
@@ -233,7 +233,7 @@ describe('linkNewItem', () => {
   });
 
   it('opens the hosted url it was handed', async () => {
-    const db = openDb(':memory:');
+    const db = openDb(':memory:', 'sandbox');
     const opened: string[] = [];
     const api = fakeApi([linkResponse([successSession()])]);
     await linkNewItem(db, api, { ...RUN, openUrl: url => opened.push(url) });

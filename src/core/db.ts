@@ -57,12 +57,72 @@ export interface TransactionRow {
   counterparty: string | null;
   /** Derived from Plaid's `pending` boolean: 'pending' | 'posted'. */
   status: string;
-  type: string;
   /**
    * Set on a posted transaction that replaced a pending one. Plaid assigns the
    * posted row a NEW id and returns the pending id under `removed`.
    */
   pending_transaction_id: string | null;
+  /** Purchase date when the institution reports it. `date` is the POST date. */
+  authorized_date: string | null;
+  /** ISO 8601. Rare — most US institutions report dates only. */
+  authorized_datetime: string | null;
+  /** ISO 8601 post timestamp. Rare, same reason. */
+  datetime: string | null;
+  /** Raw bank memo before Plaid's cleanup. Searched alongside `description`. */
+  original_description: string | null;
+  /** Plaid populates exactly one of these two. Both stored, neither coalesced. */
+  iso_currency_code: string | null;
+  /** Set instead of `iso_currency_code` for crypto and unofficial currencies. */
+  unofficial_currency_code: string | null;
+  /** VERY_HIGH | HIGH | MEDIUM | LOW | UNKNOWN. Null when Plaid omits it. */
+  category_confidence: string | null;
+  category_icon_url: string | null;
+  /** Stable merchant id across name variants. Group on this, display the name. */
+  merchant_entity_id: string | null;
+  /** ISO 18245 MCC. Coarser than Plaid's category but institution-reported. */
+  merchant_category_code: string | null;
+  website: string | null;
+  logo_url: string | null;
+  /**
+   * Type of the primary counterparty: merchant, payment_app,
+   * financial_institution, marketplace, payment_terminal, income_source.
+   * `payment_app` is the useful one — it marks a Venmo or Cash App hop where
+   * `counterparty` is the app, not who was actually paid.
+   */
+  counterparty_type: string | null;
+  /**
+   * The whole `counterparties` array as JSON, verbatim.
+   *
+   * Stored rather than flattened because it is variable-length and carries a
+   * nested `account_numbers` object; flattening would need an arbitrary cap or
+   * a child table. Query the denormalised `counterparty` and `counterparty_type`
+   * columns; reach into this only when the full chain matters.
+   */
+  counterparties_json: string | null;
+  /** online | in store | other. Held by the old `type` column before v3. */
+  payment_channel: string;
+  /** The real transaction type: ACH, bill payment, transfer, and similar. */
+  transaction_code: string | null;
+  check_number: string | null;
+  /** Which owner of a joint account transacted, when the institution says. */
+  account_owner: string | null;
+  location_address: string | null;
+  location_city: string | null;
+  location_region: string | null;
+  location_postal_code: string | null;
+  location_country: string | null;
+  /** Coordinates, not money — REAL is correct here, cents are not involved. */
+  location_lat: number | null;
+  location_lon: number | null;
+  location_store_number: string | null;
+  payment_meta_reference_number: string | null;
+  payment_meta_ppd_id: string | null;
+  payment_meta_payee: string | null;
+  payment_meta_by_order_of: string | null;
+  payment_meta_payer: string | null;
+  payment_meta_payment_method: string | null;
+  payment_meta_payment_processor: string | null;
+  payment_meta_reason: string | null;
 }
 
 /** One page of `/transactions/sync` output. */
@@ -78,7 +138,7 @@ export interface SyncPage {
  * with a confusing missing-column error — `CREATE TABLE IF NOT EXISTS` silently
  * no-ops against an existing table with different columns.
  */
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -108,21 +168,56 @@ CREATE TABLE IF NOT EXISTS accounts (
   last_synced_at          INTEGER
 );
 CREATE TABLE IF NOT EXISTS transactions (
-  id                     TEXT PRIMARY KEY,
-  account_id             TEXT NOT NULL REFERENCES accounts(id),
-  date                   TEXT NOT NULL,
-  description            TEXT NOT NULL,
-  amount_cents           INTEGER NOT NULL,
-  category_primary       TEXT,
-  category_detailed      TEXT,
-  counterparty           TEXT,
-  status                 TEXT NOT NULL,
-  type                   TEXT NOT NULL,
-  pending_transaction_id TEXT
+  id                             TEXT PRIMARY KEY,
+  account_id                     TEXT NOT NULL REFERENCES accounts(id),
+  date                           TEXT NOT NULL,
+  description                    TEXT NOT NULL,
+  amount_cents                   INTEGER NOT NULL,
+  category_primary               TEXT,
+  category_detailed              TEXT,
+  counterparty                   TEXT,
+  status                         TEXT NOT NULL,
+  pending_transaction_id         TEXT,
+  authorized_date                TEXT,
+  authorized_datetime            TEXT,
+  datetime                       TEXT,
+  original_description           TEXT,
+  iso_currency_code              TEXT,
+  unofficial_currency_code       TEXT,
+  category_confidence            TEXT,
+  category_icon_url              TEXT,
+  merchant_entity_id             TEXT,
+  merchant_category_code         TEXT,
+  website                        TEXT,
+  logo_url                       TEXT,
+  counterparty_type              TEXT,
+  counterparties_json            TEXT,
+  payment_channel                TEXT NOT NULL,
+  transaction_code               TEXT,
+  check_number                   TEXT,
+  account_owner                  TEXT,
+  location_address               TEXT,
+  location_city                  TEXT,
+  location_region                TEXT,
+  location_postal_code           TEXT,
+  location_country               TEXT,
+  location_lat                   REAL,
+  location_lon                   REAL,
+  location_store_number          TEXT,
+  payment_meta_reference_number  TEXT,
+  payment_meta_ppd_id            TEXT,
+  payment_meta_payee             TEXT,
+  payment_meta_by_order_of       TEXT,
+  payment_meta_payer             TEXT,
+  payment_meta_payment_method    TEXT,
+  payment_meta_payment_processor TEXT,
+  payment_meta_reason            TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_txn_account_date ON transactions(account_id, date);
 CREATE INDEX IF NOT EXISTS idx_txn_date ON transactions(date);
 CREATE INDEX IF NOT EXISTS idx_txn_category ON transactions(category_primary);
+CREATE INDEX IF NOT EXISTS idx_txn_merchant_entity ON transactions(merchant_entity_id);
+CREATE INDEX IF NOT EXISTS idx_txn_authorized_date ON transactions(authorized_date);
 CREATE INDEX IF NOT EXISTS idx_acct_item ON accounts(item_id);
 `;
 
@@ -142,6 +237,14 @@ function hasCoreTables(db: Db): boolean {
  * this build. There are no migrations: the tool has never shipped, so any
  * mismatch means a database from a pre-release build, and the honest fix is to
  * delete it and re-sync from Plaid rather than carry migration code forever.
+ *
+ * THIS POLICY HAS AN EXPIRY. It holds only while no bank is linked. The database
+ * stores the access tokens, and those are the one thing here that cannot be
+ * re-downloaded — so once a real Item exists, "just delete it" means re-linking
+ * every bank and consuming Item slots against the Trial plan's cap of 10.
+ *
+ * Make schema changes BEFORE linking. Once Items exist, replace this with
+ * additive migrations rather than asking a user to throw their enrollments away.
  */
 function applySchema(db: Db, dbPath: string): void {
   const version = db.pragma('user_version', { simple: true }) as number;
@@ -154,9 +257,11 @@ function applySchema(db: Db, dbPath: string): void {
     // and CREATE TABLE IF NOT EXISTS would leave them in place.
     if (hasCoreTables(db)) {
       throw new Error(
-        `${dbPath} was created by an older build with an incompatible schema. ` +
-          `No data is lost by deleting it — every row is re-downloadable from Plaid. ` +
-          `Delete the file (and its -wal/-shm siblings), then run \`ledger sync\`.`,
+        `${dbPath} was created by an older build with an incompatible schema, and there ` +
+          `are no migrations. Delete the file (and its -wal/-shm siblings), then run ` +
+          `\`ledger auth\`. Transactions are all re-downloadable from Plaid; the access ` +
+          `tokens are not, so every bank has to be linked again — which consumes Item ` +
+          `slots against the Trial plan's cap of 10.`,
       );
     }
     db.exec(SCHEMA);
@@ -377,6 +482,58 @@ export function countTransactions(db: Db, accountId: string): number {
   return row.n;
 }
 
+/**
+ * Every `transactions` column, in CREATE TABLE order. The single source for the
+ * upsert SQL below, so a new column cannot be added to the table and forgotten
+ * in the INSERT, the VALUES, or the ON CONFLICT list.
+ */
+const TXN_COLUMNS = [
+  'id', 'account_id', 'date', 'description', 'amount_cents',
+  'category_primary', 'category_detailed', 'counterparty', 'status',
+  'pending_transaction_id', 'authorized_date', 'authorized_datetime', 'datetime',
+  'original_description', 'iso_currency_code', 'unofficial_currency_code',
+  'category_confidence', 'category_icon_url', 'merchant_entity_id',
+  'merchant_category_code', 'website', 'logo_url', 'counterparty_type',
+  'counterparties_json', 'payment_channel', 'transaction_code', 'check_number',
+  'account_owner', 'location_address', 'location_city', 'location_region',
+  'location_postal_code', 'location_country', 'location_lat', 'location_lon',
+  'location_store_number', 'payment_meta_reference_number', 'payment_meta_ppd_id',
+  'payment_meta_payee', 'payment_meta_by_order_of', 'payment_meta_payer',
+  'payment_meta_payment_method', 'payment_meta_payment_processor',
+  'payment_meta_reason',
+] as const;
+
+type TxnColumn = (typeof TXN_COLUMNS)[number];
+
+/**
+ * Compile-time guard that TXN_COLUMNS and TransactionRow describe the same set
+ * of fields. Resolves to `true` when they agree and to a descriptive object type
+ * when they do not, so the assignment below fails with the offending names in
+ * the error text rather than a bare type mismatch.
+ */
+type ColumnsMatchRow = [Exclude<TxnColumn, keyof TransactionRow>] extends [never]
+  ? [Exclude<keyof TransactionRow, TxnColumn>] extends [never]
+    ? true
+    : {
+        error: 'TransactionRow declares fields absent from TXN_COLUMNS';
+        missing: Exclude<keyof TransactionRow, TxnColumn>;
+      }
+  : {
+      error: 'TXN_COLUMNS lists names absent from TransactionRow';
+      extra: Exclude<TxnColumn, keyof TransactionRow>;
+    };
+
+/** Exported so `noUnusedLocals` keeps the guard above alive. */
+export const COLUMNS_MATCH_ROW: ColumnsMatchRow = true;
+
+/** Identity columns are never rewritten; a re-sent transaction keeps its keys. */
+const TXN_MUTABLE_COLUMNS = TXN_COLUMNS.filter(c => c !== 'id' && c !== 'account_id');
+
+const UPSERT_TRANSACTION_SQL = `INSERT INTO transactions (${TXN_COLUMNS.join(', ')})
+   VALUES (${TXN_COLUMNS.map(c => `@${c}`).join(', ')})
+   ON CONFLICT(id) DO UPDATE SET
+     ${TXN_MUTABLE_COLUMNS.map(c => `${c} = excluded.${c}`).join(',\n     ')}`;
+
 export function upsertTransactions(
   db: Db,
   rows: TransactionRow[],
@@ -386,25 +543,7 @@ export function upsertTransactions(
     db,
     rows.map(r => r.id),
   );
-  const stmt = db.prepare(
-    `INSERT INTO transactions (
-       id, account_id, date, description, amount_cents, category_primary, category_detailed,
-       counterparty, status, type, pending_transaction_id
-     ) VALUES (
-       @id, @account_id, @date, @description, @amount_cents, @category_primary, @category_detailed,
-       @counterparty, @status, @type, @pending_transaction_id
-     )
-     ON CONFLICT(id) DO UPDATE SET
-       date                   = excluded.date,
-       description            = excluded.description,
-       amount_cents           = excluded.amount_cents,
-       category_primary       = excluded.category_primary,
-       category_detailed      = excluded.category_detailed,
-       counterparty           = excluded.counterparty,
-       status                 = excluded.status,
-       type                   = excluded.type,
-       pending_transaction_id = excluded.pending_transaction_id`,
-  );
+  const stmt = db.prepare(UPSERT_TRANSACTION_SQL);
   for (const row of rows) stmt.run(row);
   const updated = rows.filter(r => known.has(r.id)).length;
   return { inserted: rows.length - updated, updated };

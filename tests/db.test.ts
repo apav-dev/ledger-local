@@ -21,9 +21,14 @@ import {
   upsertItem,
   upsertTransactions,
   type AccountUpsert,
+  type Db,
   type ItemUpsert,
   type TransactionRow,
 } from '../src/core/db.js';
+
+function tmpDbPath(name: string): string {
+  return join(mkdtempSync(join(tmpdir(), 'ledger-test-')), `${name}.db`);
+}
 
 const item: ItemUpsert = {
   id: 'item_1',
@@ -62,7 +67,22 @@ function txn(id: string, over: Partial<TransactionRow> = {}): TransactionRow {
     category_detailed: 'GENERAL_MERCHANDISE_SUPERSTORES',
     counterparty: 'Costco',
     status: 'posted',
-    type: 'in store',
+    payment_channel: 'in store',
+    authorized_date: null, authorized_datetime: null, datetime: null,
+    original_description: null,
+    iso_currency_code: 'USD', unofficial_currency_code: null,
+    category_confidence: null, category_icon_url: null,
+    merchant_entity_id: null, merchant_category_code: null,
+    website: null, logo_url: null,
+    counterparty_type: null, counterparties_json: null,
+    transaction_code: null, check_number: null, account_owner: null,
+    location_address: null, location_city: null, location_region: null,
+    location_postal_code: null, location_country: null,
+    location_lat: null, location_lon: null, location_store_number: null,
+    payment_meta_reference_number: null, payment_meta_ppd_id: null,
+    payment_meta_payee: null, payment_meta_by_order_of: null,
+    payment_meta_payer: null, payment_meta_payment_method: null,
+    payment_meta_payment_processor: null, payment_meta_reason: null,
     pending_transaction_id: null,
     ...over,
   };
@@ -308,7 +328,7 @@ describe('openDb', () => {
 
   it('stamps a schema version on a fresh database', () => {
     const db = openDb(':memory:', 'sandbox');
-    expect(db.pragma('user_version', { simple: true })).toBe(2);
+    expect(db.pragma('user_version', { simple: true })).toBe(3);
   });
 
   it('reopens its own database without complaint', () => {
@@ -410,5 +430,109 @@ describe('openDb environment stamping', () => {
     } catch (error) {
       expect((error as Error).message).not.toContain(item.access_token);
     }
+  });
+});
+
+describe('schema v3', () => {
+  // Every field non-null on purpose. A column missing from the INSERT or the
+  // ON CONFLICT list shows up as a mismatch here; a fixture full of nulls
+  // would hide exactly that.
+  const fullRow = (over: Partial<TransactionRow> = {}): TransactionRow => ({
+    id: 't1', account_id: 'acc_1', date: '2026-08-01', description: 'COFFEE',
+    amount_cents: 450, category_primary: 'FOOD_AND_DRINK',
+    category_detailed: 'FOOD_AND_DRINK_COFFEE', counterparty: 'Blue Bottle',
+    status: 'posted', pending_transaction_id: 'pend_1',
+    authorized_date: '2026-07-31', authorized_datetime: '2026-07-31T18:04:00Z',
+    datetime: '2026-08-01T02:11:00Z',
+    original_description: 'SQ *BLUE BOTTLE 4411',
+    iso_currency_code: 'USD', unofficial_currency_code: 'BTC',
+    category_confidence: 'VERY_HIGH',
+    category_icon_url: 'https://plaid-category-icons.plaid.com/FOOD_AND_DRINK.png',
+    merchant_entity_id: 'ent_bb', merchant_category_code: '5814',
+    website: 'bluebottlecoffee.com',
+    logo_url: 'https://plaid-merchant-logos.plaid.com/blue_bottle.png',
+    counterparty_type: 'merchant',
+    counterparties_json: '[{"name":"Blue Bottle","type":"merchant"}]',
+    payment_channel: 'in store', transaction_code: 'purchase',
+    check_number: '1234', account_owner: 'AARON PAVLICK',
+    location_address: '300 Webster St', location_city: 'Oakland',
+    location_region: 'CA', location_postal_code: '94607',
+    location_country: 'US', location_lat: 37.8, location_lon: -122.27,
+    location_store_number: '4411',
+    payment_meta_reference_number: 'REF1', payment_meta_ppd_id: 'PPD1',
+    payment_meta_payee: 'Payee', payment_meta_by_order_of: 'Order',
+    payment_meta_payer: 'Payer', payment_meta_payment_method: 'ACH',
+    payment_meta_payment_processor: 'Stripe', payment_meta_reason: 'Reason',
+    ...over,
+  });
+
+  // NOT seedDb(): that fixture inserts transactions, and Task 4 is what widens
+  // them. Task 1 must stand alone, so it builds the minimum a transaction needs
+  // — one item, one account for the foreign key — and nothing else.
+  function dbWithAccount(): Db {
+    const db = openDb(':memory:', 'sandbox');
+    upsertItem(db, {
+      id: 'item_1', access_token: 'tok', institution: 'Chase',
+      institution_id: 'ins_56', created_at: 1,
+    });
+    upsertAccount(db, {
+      id: 'acc_1', item_id: 'item_1', name: 'Checking', official_name: null,
+      institution: 'Chase', type: 'depository', subtype: 'checking', mask: '1111',
+      iso_currency_code: 'USD', available_balance_cents: 0, current_balance_cents: 0,
+    });
+    return db;
+  }
+
+  it('round-trips every column a TransactionRow declares', () => {
+    const db = dbWithAccount();
+    const row = fullRow({ id: 't_full' });
+
+    upsertTransactions(db, [row]);
+
+    const read = db.prepare('SELECT * FROM transactions WHERE id = ?').get('t_full');
+    // Equality against the whole row, not field-by-field: a column present in
+    // the type but missing from the INSERT would otherwise pass unnoticed.
+    expect(read).toEqual(row);
+  });
+
+  it('updates every column on conflict', () => {
+    const db = dbWithAccount();
+    upsertTransactions(db, [fullRow({ id: 't_up' })]);
+
+    // Every mutable column changes value. A column left out of the ON CONFLICT
+    // list keeps its old value and fails this comparison.
+    const changed: TransactionRow = Object.fromEntries(
+      Object.entries(fullRow({ id: 't_up' })).map(([k, v]) => {
+        if (k === 'id' || k === 'account_id') return [k, v];
+        if (typeof v === 'number') return [k, v + 1];
+        return [k, `${String(v)}-changed`];
+      }),
+    ) as TransactionRow;
+    upsertTransactions(db, [changed]);
+
+    expect(db.prepare('SELECT * FROM transactions WHERE id = ?').get('t_up')).toEqual(changed);
+  });
+
+  it('has no `type` column — payment_channel replaced it', () => {
+    const db = dbWithAccount();
+
+    const columns = (db.pragma('table_info(transactions)') as Array<{ name: string }>)
+      .map(c => c.name);
+
+    expect(columns).toContain('payment_channel');
+    expect(columns).not.toContain('type');
+  });
+
+  it('rejects a database written by an older build, naming the real cost', () => {
+    const dbPath = tmpDbPath('stale');
+    const raw = new Database(dbPath);
+    raw.exec('CREATE TABLE items (id TEXT PRIMARY KEY)');
+    raw.pragma('user_version = 2');
+    raw.close();
+
+    // The old message claimed "No data is lost by deleting it", which is false
+    // once an access token is in there and contradicts the README.
+    expect(() => openDb(dbPath, 'sandbox')).toThrow(/re-link/i);
+    expect(() => openDb(dbPath, 'sandbox')).not.toThrow(/No data is lost/i);
   });
 });

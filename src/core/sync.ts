@@ -63,7 +63,6 @@ export function toTransactionRow(t: Transaction): TransactionRow {
     counterparties_json:
       t.counterparties === undefined ? null : JSON.stringify(t.counterparties),
     merchant_entity_id: t.merchant_entity_id ?? null,
-    merchant_category_code: t.merchant_category_code ?? null,
     website: t.website ?? null,
     logo_url: t.logo_url ?? null,
     payment_channel: t.payment_channel,

@@ -79,8 +79,6 @@ export interface TransactionRow {
   category_icon_url: string | null;
   /** Stable merchant id across name variants. Group on this, display the name. */
   merchant_entity_id: string | null;
-  /** ISO 18245 MCC. Coarser than Plaid's category but institution-reported. */
-  merchant_category_code: string | null;
   website: string | null;
   logo_url: string | null;
   /**
@@ -187,7 +185,6 @@ CREATE TABLE IF NOT EXISTS transactions (
   category_confidence            TEXT,
   category_icon_url              TEXT,
   merchant_entity_id             TEXT,
-  merchant_category_code         TEXT,
   website                        TEXT,
   logo_url                       TEXT,
   counterparty_type              TEXT,
@@ -493,7 +490,7 @@ const TXN_COLUMNS = [
   'pending_transaction_id', 'authorized_date', 'authorized_datetime', 'datetime',
   'original_description', 'iso_currency_code', 'unofficial_currency_code',
   'category_confidence', 'category_icon_url', 'merchant_entity_id',
-  'merchant_category_code', 'website', 'logo_url', 'counterparty_type',
+  'website', 'logo_url', 'counterparty_type',
   'counterparties_json', 'payment_channel', 'transaction_code', 'check_number',
   'account_owner', 'location_address', 'location_city', 'location_region',
   'location_postal_code', 'location_country', 'location_lat', 'location_lon',

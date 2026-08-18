@@ -32,19 +32,61 @@ export interface AccountSyncResult {
 }
 
 export function toTransactionRow(t: Transaction): TransactionRow {
+  // Plaid orders counterparties by descending confidence, so [0] is the primary.
+  // When merchant_name is set it is normally the same entity; when it is not,
+  // this is the only name available.
+  const primary = t.counterparties?.[0];
   return {
     id: t.transaction_id,
     account_id: t.account_id,
     date: t.date,
+    authorized_date: t.authorized_date ?? null,
+    authorized_datetime: t.authorized_datetime ?? null,
+    datetime: t.datetime ?? null,
     description: t.name,
+    original_description: t.original_description ?? null,
     // The one place decimal dollars become integer cents. The sign is kept
     // exactly as Plaid sends it: POSITIVE means money left the account.
     amount_cents: toCents(t.amount),
+    // Both stored as sent. Plaid populates exactly one, and which one it picks
+    // is information — coalescing them would erase that a value was unofficial.
+    iso_currency_code: t.iso_currency_code ?? null,
+    unofficial_currency_code: t.unofficial_currency_code ?? null,
     category_primary: t.personal_finance_category?.primary ?? null,
     category_detailed: t.personal_finance_category?.detailed ?? null,
-    counterparty: t.merchant_name ?? null,
+    category_confidence: t.personal_finance_category?.confidence_level ?? null,
+    category_icon_url: t.personal_finance_category_icon_url ?? null,
+    counterparty: t.merchant_name ?? primary?.name ?? null,
+    counterparty_type: primary?.type ?? null,
+    // Only when Plaid sent one, so an absent array stays NULL rather than
+    // becoming the string "[]" — those mean different things.
+    counterparties_json:
+      t.counterparties === undefined ? null : JSON.stringify(t.counterparties),
+    merchant_entity_id: t.merchant_entity_id ?? null,
+    merchant_category_code: t.merchant_category_code ?? null,
+    website: t.website ?? null,
+    logo_url: t.logo_url ?? null,
+    payment_channel: t.payment_channel,
+    transaction_code: t.transaction_code ?? null,
+    check_number: t.check_number ?? null,
+    account_owner: t.account_owner ?? null,
+    location_address: t.location?.address ?? null,
+    location_city: t.location?.city ?? null,
+    location_region: t.location?.region ?? null,
+    location_postal_code: t.location?.postal_code ?? null,
+    location_country: t.location?.country ?? null,
+    location_lat: t.location?.lat ?? null,
+    location_lon: t.location?.lon ?? null,
+    location_store_number: t.location?.store_number ?? null,
+    payment_meta_reference_number: t.payment_meta?.reference_number ?? null,
+    payment_meta_ppd_id: t.payment_meta?.ppd_id ?? null,
+    payment_meta_payee: t.payment_meta?.payee ?? null,
+    payment_meta_by_order_of: t.payment_meta?.by_order_of ?? null,
+    payment_meta_payer: t.payment_meta?.payer ?? null,
+    payment_meta_payment_method: t.payment_meta?.payment_method ?? null,
+    payment_meta_payment_processor: t.payment_meta?.payment_processor ?? null,
+    payment_meta_reason: t.payment_meta?.reason ?? null,
     status: t.pending ? 'pending' : 'posted',
-    type: t.payment_channel,
     pending_transaction_id: t.pending_transaction_id ?? null,
   };
 }

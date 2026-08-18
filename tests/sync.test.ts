@@ -107,7 +107,7 @@ describe('toTransactionRow', () => {
     expect(row.category_primary).toBe('FOOD_AND_DRINK');
     expect(row.category_detailed).toBe('FOOD_AND_DRINK_COFFEE');
     expect(row.status).toBe('posted');
-    expect(row.type).toBe('in store');
+    expect(row.payment_channel).toBe('in store');
   });
 
   it('keeps inflows negative', () => {
@@ -132,6 +132,152 @@ describe('toTransactionRow', () => {
     expect(row.category_primary).toBeNull();
     expect(row.category_detailed).toBeNull();
     expect(row.counterparty).toBeNull();
+  });
+});
+
+describe('toTransactionRow field mapping', () => {
+  it('carries the enrichment fields Plaid sends', () => {
+    const row = toTransactionRow(
+      txn('t_rich', {
+        authorized_date: '2026-07-30',
+        original_description: 'SQ *BLUE BOTTLE 4411',
+        merchant_entity_id: 'ent_bluebottle',
+        transaction_code: 'purchase' as Transaction['transaction_code'],
+        personal_finance_category: {
+          primary: 'FOOD_AND_DRINK',
+          detailed: 'FOOD_AND_DRINK_COFFEE',
+          confidence_level: 'VERY_HIGH',
+        },
+        location: {
+          address: null, city: 'Oakland', region: 'CA', postal_code: null,
+          country: 'US', lat: null, lon: null, store_number: null,
+        } as Transaction['location'],
+      }),
+    );
+
+    expect(row.authorized_date).toBe('2026-07-30');
+    expect(row.original_description).toBe('SQ *BLUE BOTTLE 4411');
+    expect(row.merchant_entity_id).toBe('ent_bluebottle');
+    expect(row.transaction_code).toBe('purchase');
+    expect(row.category_confidence).toBe('VERY_HIGH');
+    expect(row.location_city).toBe('Oakland');
+    expect(row.location_region).toBe('CA');
+    expect(row.payment_channel).toBe('in store');
+    expect(row.iso_currency_code).toBe('USD');
+  });
+
+  it('nulls every optional field when Plaid omits it', () => {
+    const row = toTransactionRow(
+      txn('t_bare', {
+        merchant_name: null,
+        personal_finance_category: null,
+        iso_currency_code: null,
+        unofficial_currency_code: null,
+      }),
+    );
+
+    expect(row.authorized_date).toBeNull();
+    expect(row.original_description).toBeNull();
+    expect(row.merchant_entity_id).toBeNull();
+    expect(row.transaction_code).toBeNull();
+    expect(row.category_confidence).toBeNull();
+    expect(row.counterparty).toBeNull();
+    expect(row.counterparty_type).toBeNull();
+    expect(row.iso_currency_code).toBeNull();
+  });
+
+  it('falls back to the primary counterparty when merchant_name is absent, and records its type', () => {
+    const row = toTransactionRow(
+      txn('t_venmo', {
+        merchant_name: null,
+        counterparties: [
+          {
+            name: 'Venmo',
+            type: 'payment_app' as never,
+            entity_id: 'ent_venmo',
+            website: null,
+            logo_url: null,
+            confidence_level: 'HIGH',
+          },
+        ] as Transaction['counterparties'],
+      }),
+    );
+
+    expect(row.counterparty).toBe('Venmo');
+    expect(row.counterparty_type).toBe('payment_app');
+  });
+
+  it('keeps the two currency codes separate rather than coalescing them', () => {
+    const row = toTransactionRow(
+      txn('t_crypto', { iso_currency_code: null, unofficial_currency_code: 'BTC' }),
+    );
+
+    expect(row.iso_currency_code).toBeNull();
+    expect(row.unofficial_currency_code).toBe('BTC');
+  });
+
+  it('flattens location and payment_meta into their own columns', () => {
+    const row = toTransactionRow(
+      txn('t_ach', {
+        location: {
+          address: '300 Webster St', city: 'Oakland', region: 'CA',
+          postal_code: '94607', country: 'US', lat: 37.8, lon: -122.27,
+          store_number: '4411',
+        } as Transaction['location'],
+        payment_meta: {
+          reference_number: 'REF1', ppd_id: 'PPD1', payee: 'Landlord',
+          by_order_of: null, payer: null, payment_method: 'ACH',
+          payment_processor: null, reason: 'RENT',
+        } as Transaction['payment_meta'],
+        check_number: '1234',
+        account_owner: 'AARON PAVLICK',
+      }),
+    );
+
+    expect(row.location_address).toBe('300 Webster St');
+    expect(row.location_postal_code).toBe('94607');
+    expect(row.location_lat).toBe(37.8);
+    expect(row.location_lon).toBe(-122.27);
+    expect(row.location_store_number).toBe('4411');
+    expect(row.payment_meta_reference_number).toBe('REF1');
+    expect(row.payment_meta_payee).toBe('Landlord');
+    expect(row.payment_meta_payment_method).toBe('ACH');
+    expect(row.payment_meta_reason).toBe('RENT');
+    expect(row.payment_meta_by_order_of).toBeNull();
+    expect(row.check_number).toBe('1234');
+    expect(row.account_owner).toBe('AARON PAVLICK');
+  });
+
+  it('stores the whole counterparties array as JSON, and NULL when absent', () => {
+    const withArray = toTransactionRow(
+      txn('t_cp', {
+        counterparties: [
+          { name: 'Venmo', type: 'payment_app' as never, entity_id: 'ent_v',
+            website: null, logo_url: null, confidence_level: 'HIGH' },
+          { name: 'Corner Store', type: 'merchant' as never, entity_id: 'ent_c',
+            website: null, logo_url: null, confidence_level: 'MEDIUM' },
+        ] as Transaction['counterparties'],
+      }),
+    );
+    const without = toTransactionRow(txn('t_nocp', { counterparties: undefined }));
+
+    // The full chain survives even though only the primary is denormalised.
+    expect(JSON.parse(withArray.counterparties_json ?? '[]')).toHaveLength(2);
+    expect(withArray.counterparty_type).toBe('payment_app');
+    // NULL, not "[]" — "Plaid sent nothing" and "Plaid sent an empty list" differ.
+    expect(without.counterparties_json).toBeNull();
+  });
+
+  it('survives a payload missing location and payment_meta entirely', () => {
+    const row = toTransactionRow(
+      txn('t_sparse', {
+        location: undefined as never,
+        payment_meta: undefined as never,
+      }),
+    );
+
+    expect(row.location_city).toBeNull();
+    expect(row.payment_meta_payee).toBeNull();
   });
 });
 

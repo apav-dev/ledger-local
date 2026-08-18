@@ -10,7 +10,13 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-18-plaid-capability-expansion.md` (Feature 3)
 
-**Depends on:** Plan 01 (schema v3), Plan 02 (schema v4, `recurring_transactions` consent, `itemConsent`). This plan bumps to v5.
+**Depends on:** Plan 01 (schema v3), Plan 02 (schema v4, `itemConsent`). This plan bumps to v5.
+
+**Settled by Plan 02's probe:** Plaid rejects `recurring_transactions` as an
+`additional_consented_product` (INVALID_PRODUCT). It is an account-level product
+enabled in the dashboard, not a per-Item consent — so there is no consent step
+gating this plan, and every error message here must avoid pointing at
+`ledger auth consent`, which cannot grant it.
 
 ## Global Constraints
 
@@ -141,12 +147,14 @@ In `src/core/plaid-client.ts`, add after `isItemNotFound`:
 
 ```ts
 /**
- * The Item has not consented to the product being called. Distinct from a
- * reauth: the credentials are fine, the permission grant is not — and the fix
- * is `ledger auth consent <item_id>`, which is update mode, not a re-link.
+ * Plaid refused the product, not the credentials. Distinct from a reauth: the
+ * access token is fine, the entitlement is not.
  *
- * Two codes because Plaid reports this differently depending on whether the
- * product was never consented or the consent has since lapsed.
+ * The fix is NOT `ledger auth consent`. A sandbox probe on 2026-08-18 confirmed
+ * Plaid rejects `recurring_transactions` and `transactions_refresh` as
+ * `additional_consented_products` with INVALID_PRODUCT — they are account-level
+ * products enabled in the dashboard, not per-Item consents. Advising the consent
+ * command here would send the user somewhere that cannot help them.
  */
 export function isConsentRequired(error: unknown): boolean {
   return (
@@ -668,7 +676,9 @@ describe('refreshRecurring', () => {
 
     expect(results[0]?.ok).toBe(false);
     expect(results[0]?.needsConsent).toBe(true);
-    expect(results[0]?.error).toMatch(/ledger auth consent/);
+    // Must NOT advise `ledger auth consent` — that cannot grant this product.
+    expect(results[0]?.error).toMatch(/Dashboard > Developers > Products/);
+    expect(results[0]?.error).not.toMatch(/ledger auth consent/);
     // A failed refresh must not wipe the previous snapshot.
     expect(listRecurringStreamRows(db)).toHaveLength(1);
   });
@@ -792,10 +802,17 @@ import type { QueryMeta } from './queries.js';
 
 const STALE_MS = 24 * 3600 * 1000;
 
-const CONSENT_HINT =
-  'This bank has not consented to recurring transactions. Run ' +
-  '`ledger auth consent <item_id>` — it uses Link update mode, so it does not create a ' +
-  'duplicate connection or consume an Item slot.';
+/**
+ * Deliberately does not mention `ledger auth consent`. Recurring Transactions is
+ * not grantable through Link consent — Plaid rejects it as an
+ * additional_consented_product — so the only real fixes are the dashboard or the
+ * institution.
+ */
+const PRODUCT_HINT =
+  'Plaid refused recurring transactions for this bank. This is not something ' +
+  '`ledger auth consent` can grant: Recurring Transactions is enabled per client_id at ' +
+  'Dashboard > Developers > Products, not per Item. Check it is enabled there, and note ' +
+  'that not every institution supports it.';
 
 function toRow(
   s: TransactionStream,
@@ -895,7 +912,7 @@ export async function refreshRecurring(
         ok: false,
         streams: 0,
         removed: 0,
-        error: consent ? CONSENT_HINT : error instanceof Error ? error.message : String(error),
+        error: consent ? PRODUCT_HINT : error instanceof Error ? error.message : String(error),
         // Undefined rather than false so the JSON stays quiet in the common case.
         needsReauth: isReauthRequired(error) ? true : undefined,
         needsConsent: consent ? true : undefined,
@@ -1117,10 +1134,11 @@ import { recurringResultView } from '../core/views.js';
 Add a printer beside `printSyncResults`:
 
 ```ts
-const CONSENT_HINT =
-  'One or more banks have not consented to recurring transactions.\n' +
-  'Run `ledger auth consent` — Link update mode, so no duplicate connection and no\n' +
-  'Item slot consumed.';
+const RECURRING_PRODUCT_HINT =
+  'Plaid refused recurring transactions for one or more banks.\n' +
+  '`ledger auth consent` cannot fix this — Recurring Transactions is enabled per\n' +
+  'client_id at Dashboard > Developers > Products, not per Item. Check it is enabled\n' +
+  'there; also note that not every institution supports it.';
 
 function printRecurringRefresh(results: RecurringRefreshResult[], json: boolean): void {
   if (json) {
@@ -1137,7 +1155,7 @@ function printRecurringRefresh(results: RecurringRefreshResult[], json: boolean)
       ) + '\n',
     );
   }
-  if (results.some(r => r.needsConsent)) process.stderr.write(CONSENT_HINT + '\n');
+  if (results.some(r => r.needsConsent)) process.stderr.write(RECURRING_PRODUCT_HINT + '\n');
   if (results.some(r => r.needsReauth)) {
     process.stderr.write(REAUTH_HINT + '\n');
     process.exitCode = EXIT_REAUTH;
@@ -1378,9 +1396,10 @@ Register immediately after `list_recurring`:
         'Each refresh REPLACES every stream for a bank — Plaid returns a full snapshot ' +
         'with no cursor, so a stream that disappears has ended rather than been lost. ' +
         'A per-bank failure does not discard that bank\'s existing streams. ' +
-        'If a result carries needsConsent, that bank has never consented to recurring ' +
-        'transactions: report the error text to the user, which names the exact command ' +
-        'they need to run. Do not retry — the fix requires a browser.',
+        'If a result carries needsConsent, Plaid refused the product for that bank. Report ' +
+        'the error text verbatim — it explains that this is a dashboard setting, not ' +
+        'something the user can grant from a terminal. Do not retry and do not suggest ' +
+        '`ledger auth consent`, which cannot grant this product.',
       inputSchema: {
         itemId: z.string().optional().describe('refresh only this institution'),
       },
@@ -1430,9 +1449,9 @@ list and append:
 
 ```markdown
 `list_recurring` reads the local stream cache; `refresh_recurring` refetches it
-from the banks. A bank that has never consented to recurring transactions
-returns an error naming the `ledger auth consent` command needed to fix it —
-that step needs a browser and stays CLI-only.
+from the banks. If Plaid refuses the product, the error says so and points at the
+Plaid dashboard — Recurring Transactions is enabled per `client_id`, not granted
+per Item, so `ledger auth consent` cannot fix it.
 ```
 
 Add a new top-level section before **State**:

@@ -10,7 +10,12 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-18-plaid-capability-expansion.md` (Feature 4)
 
-**Depends on:** Plan 02 (`transactions_refresh` consent and `isConsentRequired`). Plan 02's Task 1 probe determines whether that product name is accepted; if it was rejected, the `needsConsent` path here still works — it just reports whatever Plaid returns.
+**Depends on:** Plan 02 (`isConsentRequired`), Plan 03 if run after it.
+
+**Settled by Plan 02's probe:** Plaid rejects `transactions_refresh` as an
+`additional_consented_product` (INVALID_PRODUCT), so there is no consent step to
+add. If `/transactions/refresh` is refused it is a dashboard product setting, not
+something `ledger auth consent` can grant — any message about it must say so.
 
 ## Global Constraints
 

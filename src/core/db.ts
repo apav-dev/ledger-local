@@ -140,12 +140,94 @@ export interface SyncPage {
 }
 
 /**
- * Bumped whenever the schema changes. Stored in `PRAGMA user_version` so a
- * database written by an older build is rejected loudly instead of failing later
- * with a confusing missing-column error — `CREATE TABLE IF NOT EXISTS` silently
- * no-ops against an existing table with different columns.
+ * Bumped whenever the schema changes. Stored in `PRAGMA user_version`. Older
+ * databases are upgraded by MIGRATIONS; a database from a newer build is refused.
  */
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
+
+const TBL_LIABILITY_MORTGAGE = `liability_mortgage (
+  account_id                         TEXT PRIMARY KEY REFERENCES accounts(id),
+  item_id                            TEXT NOT NULL REFERENCES items(id),
+  refreshed_at                       INTEGER NOT NULL,
+  interest_rate_percentage           REAL,
+  interest_rate_type                 TEXT,
+  escrow_balance_cents               INTEGER,
+  current_late_fee_cents             INTEGER,
+  has_pmi                            INTEGER,
+  has_prepayment_penalty             INTEGER,
+  last_payment_amount_cents          INTEGER,
+  last_payment_date                  TEXT,
+  loan_type_description              TEXT,
+  loan_term                          TEXT,
+  maturity_date                      TEXT,
+  next_monthly_payment_cents         INTEGER,
+  next_payment_due_date              TEXT,
+  origination_date                   TEXT,
+  origination_principal_amount_cents INTEGER,
+  past_due_amount_cents              INTEGER,
+  property_street                    TEXT,
+  property_city                      TEXT,
+  property_region                    TEXT,
+  property_postal_code               TEXT,
+  property_country                   TEXT,
+  ytd_interest_paid_cents            INTEGER,
+  ytd_principal_paid_cents           INTEGER
+)`;
+
+const TBL_LIABILITY_CREDIT = `liability_credit (
+  account_id                    TEXT PRIMARY KEY REFERENCES accounts(id),
+  item_id                       TEXT NOT NULL REFERENCES items(id),
+  refreshed_at                  INTEGER NOT NULL,
+  is_overdue                    INTEGER,
+  last_payment_amount_cents     INTEGER,
+  last_payment_date             TEXT,
+  last_statement_issue_date     TEXT,
+  last_statement_balance_cents  INTEGER,
+  minimum_payment_amount_cents  INTEGER,
+  next_payment_due_date         TEXT,
+  purchase_apr_percentage       REAL
+)`;
+
+const TBL_LIABILITY_CREDIT_APR = `liability_credit_apr (
+  account_id                    TEXT NOT NULL REFERENCES accounts(id),
+  item_id                       TEXT NOT NULL REFERENCES items(id),
+  refreshed_at                  INTEGER NOT NULL,
+  apr_type                      TEXT NOT NULL,
+  apr_percentage                REAL NOT NULL,
+  balance_subject_to_apr_cents  INTEGER,
+  interest_charge_amount_cents  INTEGER
+)`;
+
+const LIABILITY_INDEXES = [
+  'idx_liability_mortgage_item ON liability_mortgage(item_id)',
+  'idx_liability_credit_item ON liability_credit(item_id)',
+  'idx_liability_credit_apr_item ON liability_credit_apr(item_id)',
+  'idx_liability_credit_apr_account ON liability_credit_apr(account_id)',
+] as const;
+
+/**
+ * Forward-only additive migrations, applied in order from the database's
+ * user_version up to SCHEMA_VERSION.
+ *
+ * The old policy — bump the version and tell the user to delete the database —
+ * expired when the first production Item was linked. The database is now the
+ * only copy of the access tokens, every command routes through openDb, and on
+ * the Trial plan a removed Item does not return its slot. "Delete it and
+ * re-link" is no longer a recoverable instruction.
+ *
+ * Additive only: ADD COLUMN and CREATE TABLE. A migration that rewrites data
+ * needs its own reviewed path, not this loop.
+ */
+const MIGRATIONS: Record<number, readonly string[]> = {
+  6: [
+    'ALTER TABLE accounts ADD COLUMN limit_cents INTEGER',
+    'ALTER TABLE items ADD COLUMN liabilities_refreshed_at INTEGER',
+    `CREATE TABLE ${TBL_LIABILITY_MORTGAGE}`,
+    `CREATE TABLE ${TBL_LIABILITY_CREDIT}`,
+    `CREATE TABLE ${TBL_LIABILITY_CREDIT_APR}`,
+    ...LIABILITY_INDEXES.map(idx => `CREATE INDEX ${idx}`),
+  ],
+};
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -159,7 +241,8 @@ CREATE TABLE IF NOT EXISTS items (
   institution_id  TEXT,
   cursor          TEXT,
   created_at      INTEGER NOT NULL,
-  consented_products TEXT
+  consented_products TEXT,
+  liabilities_refreshed_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS accounts (
   id                      TEXT PRIMARY KEY,
@@ -173,7 +256,8 @@ CREATE TABLE IF NOT EXISTS accounts (
   iso_currency_code       TEXT,
   available_balance_cents INTEGER,
   current_balance_cents   INTEGER,
-  last_synced_at          INTEGER
+  last_synced_at          INTEGER,
+  limit_cents             INTEGER
 );
 CREATE TABLE IF NOT EXISTS transactions (
   id                             TEXT PRIMARY KEY,
@@ -248,6 +332,10 @@ CREATE TABLE IF NOT EXISTS recurring_streams (
 );
 CREATE INDEX IF NOT EXISTS idx_stream_item ON recurring_streams(item_id);
 CREATE INDEX IF NOT EXISTS idx_stream_next ON recurring_streams(predicted_next_date);
+CREATE TABLE IF NOT EXISTS ${TBL_LIABILITY_MORTGAGE};
+CREATE TABLE IF NOT EXISTS ${TBL_LIABILITY_CREDIT};
+CREATE TABLE IF NOT EXISTS ${TBL_LIABILITY_CREDIT_APR};
+${LIABILITY_INDEXES.map(idx => `CREATE INDEX IF NOT EXISTS ${idx};`).join('\n')}
 `;
 
 /** True when the core tables already exist, i.e. something wrote this file before. */
@@ -262,18 +350,12 @@ function hasCoreTables(db: Db): boolean {
 }
 
 /**
- * Creates the schema on a fresh database, or verifies an existing one matches
- * this build. There are no migrations: the tool has never shipped, so any
- * mismatch means a database from a pre-release build, and the honest fix is to
- * delete it and re-sync from Plaid rather than carry migration code forever.
+ * Creates the schema on a fresh database, or migrates an older one forward.
  *
- * THIS POLICY HAS AN EXPIRY. It holds only while no bank is linked. The database
- * stores the access tokens, and those are the one thing here that cannot be
- * re-downloaded — so once a real Item exists, "just delete it" means re-linking
- * every bank and consuming Item slots against the Trial plan's cap of 10.
- *
- * Make schema changes BEFORE linking. Once Items exist, replace this with
- * additive migrations rather than asking a user to throw their enrollments away.
+ * Version 0 with tables already present is a pre-versioning build (REAL dollar
+ * columns) and cannot be migrated. A version newer than this build is refused.
+ * Everything in between is applied by MIGRATIONS, or refused if a step is
+ * missing — we do not jump a gap.
  */
 function applySchema(db: Db, dbPath: string): void {
   const version = db.pragma('user_version', { simple: true }) as number;
@@ -287,10 +369,11 @@ function applySchema(db: Db, dbPath: string): void {
     if (hasCoreTables(db)) {
       throw new Error(
         `${dbPath} was created by an older build with an incompatible schema, and there ` +
-          `are no migrations. Delete the file (and its -wal/-shm siblings), then run ` +
-          `\`ledger auth\`. Transactions are all re-downloadable from Plaid; the access ` +
-          `tokens are not, so every bank has to be linked again — which consumes Item ` +
-          `slots against the Trial plan's cap of 10.`,
+          `are no migrations from that version. Delete the file (and its -wal/-shm siblings), ` +
+          `then run \`ledger auth\`. Transactions are all re-downloadable from Plaid; the ` +
+          `access tokens are not, so every bank has to be re-linked. On the Trial plan a ` +
+          `removed Item does not return its slot — re-linking consumes a new slot against ` +
+          `the cap of 10.`,
       );
     }
     db.exec(SCHEMA);
@@ -305,11 +388,37 @@ function applySchema(db: Db, dbPath: string): void {
     );
   }
 
-  throw new Error(
+  applyMigrations(db, version, dbPath);
+}
+
+function olderSchemaError(dbPath: string, version: number, missing: number): Error {
+  return new Error(
     `${dbPath} has schema version ${version}, but this build expects ${SCHEMA_VERSION}. ` +
-      `It was written by an older build and there are no migrations. Delete the file ` +
-      `(and its -wal/-shm siblings), then run \`ledger auth\` to re-link and re-sync.`,
+      `No migration is defined for version ${missing}. Delete the file ` +
+      `(and its -wal/-shm siblings), then run \`ledger auth\` to re-link and re-sync. ` +
+      `Every bank has to be re-linked, and on the Trial plan a removed Item does not ` +
+      `return its slot.`,
   );
+}
+
+/**
+ * Applies every migration from `fromVersion + 1` through SCHEMA_VERSION in one
+ * transaction, stamping user_version only at the end. A statement that fails
+ * rolls the whole step back, including the version bump.
+ */
+function applyMigrations(db: Db, fromVersion: number, dbPath: string): void {
+  const statements: string[] = [];
+  for (let next = fromVersion + 1; next <= SCHEMA_VERSION; next++) {
+    const step = MIGRATIONS[next];
+    if (step === undefined) throw olderSchemaError(dbPath, fromVersion, next);
+    statements.push(...step);
+  }
+
+  const run = db.transaction(() => {
+    for (const sql of statements) db.exec(sql);
+    db.pragma(`user_version = ${SCHEMA_VERSION}`);
+  });
+  run();
 }
 
 export function readMeta(db: Db, key: string): string | undefined {

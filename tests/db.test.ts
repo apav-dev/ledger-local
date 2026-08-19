@@ -34,7 +34,8 @@ import {
 import { fullTransactionRow, seedDb } from './helpers.js';
 
 function tmpDbPath(name: string): string {
-  return join(mkdtempSync(join(tmpdir(), 'ledger-test-')), `${name}.db`);
+  tmpDbDir = mkdtempSync(join(tmpdir(), 'ledger-test-'));
+  return join(tmpDbDir, `${name}.db`);
 }
 
 const item: ItemUpsert = {
@@ -336,7 +337,7 @@ describe('openDb', () => {
 
   it('stamps a schema version on a fresh database', () => {
     const db = openDb(':memory:', 'sandbox');
-    expect(db.pragma('user_version', { simple: true })).toBe(5);
+    expect(db.pragma('user_version', { simple: true })).toBe(6);
   });
 
   it('reopens its own database without complaint', () => {
@@ -359,6 +360,8 @@ describe('openDb', () => {
     legacy.close(); // user_version stays 0
 
     expect(() => openDb(dbPath, 'sandbox')).toThrow(/older build with an incompatible schema/);
+    expect(() => openDb(dbPath, 'sandbox')).toThrow(/re-link/i);
+    expect(() => openDb(dbPath, 'sandbox')).toThrow(/does not return/);
   });
 
   it('refuses a database written by a newer build', () => {
@@ -550,11 +553,241 @@ describe('item consent', () => {
     expect(itemConsent(db, 'item_1')).toEqual(['liabilities']);
   });
 
-  it('stamps a fresh database at version 5 with the table present', () => {
+  it('stamps a fresh database at version 6 with the table present', () => {
     const db = openDb(':memory:', 'sandbox');
 
-    expect(db.pragma('user_version', { simple: true })).toBe(5);
+    expect(db.pragma('user_version', { simple: true })).toBe(6);
     expect(() => db.prepare('SELECT * FROM recurring_streams').all()).not.toThrow();
+  });
+});
+
+/**
+ * Frozen copy of schema v5. After SCHEMA in db.ts moves to v6, this is the only
+ * remaining definition of what a production database actually looks like today.
+ */
+const V5_SCHEMA = `
+CREATE TABLE IF NOT EXISTS meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS items (
+  id              TEXT PRIMARY KEY,
+  access_token    TEXT NOT NULL,
+  institution     TEXT NOT NULL,
+  institution_id  TEXT,
+  cursor          TEXT,
+  created_at      INTEGER NOT NULL,
+  consented_products TEXT
+);
+CREATE TABLE IF NOT EXISTS accounts (
+  id                      TEXT PRIMARY KEY,
+  item_id                 TEXT NOT NULL REFERENCES items(id),
+  name                    TEXT NOT NULL,
+  official_name           TEXT,
+  institution             TEXT NOT NULL,
+  type                    TEXT NOT NULL,
+  subtype                 TEXT,
+  mask                    TEXT,
+  iso_currency_code       TEXT,
+  available_balance_cents INTEGER,
+  current_balance_cents   INTEGER,
+  last_synced_at          INTEGER
+);
+CREATE TABLE IF NOT EXISTS transactions (
+  id                             TEXT PRIMARY KEY,
+  account_id                     TEXT NOT NULL REFERENCES accounts(id),
+  date                           TEXT NOT NULL,
+  description                    TEXT NOT NULL,
+  amount_cents                   INTEGER NOT NULL,
+  category_primary               TEXT,
+  category_detailed              TEXT,
+  counterparty                   TEXT,
+  status                         TEXT NOT NULL,
+  pending_transaction_id         TEXT,
+  authorized_date                TEXT,
+  authorized_datetime            TEXT,
+  datetime                       TEXT,
+  original_description           TEXT,
+  iso_currency_code              TEXT,
+  unofficial_currency_code       TEXT,
+  category_confidence            TEXT,
+  category_icon_url              TEXT,
+  merchant_entity_id             TEXT,
+  website                        TEXT,
+  logo_url                       TEXT,
+  counterparty_type              TEXT,
+  counterparties_json            TEXT,
+  payment_channel                TEXT NOT NULL,
+  transaction_code               TEXT,
+  check_number                   TEXT,
+  account_owner                  TEXT,
+  location_address               TEXT,
+  location_city                  TEXT,
+  location_region                TEXT,
+  location_postal_code           TEXT,
+  location_country               TEXT,
+  location_lat                   REAL,
+  location_lon                   REAL,
+  location_store_number          TEXT,
+  payment_meta_reference_number  TEXT,
+  payment_meta_ppd_id            TEXT,
+  payment_meta_payee             TEXT,
+  payment_meta_by_order_of       TEXT,
+  payment_meta_payer             TEXT,
+  payment_meta_payment_method    TEXT,
+  payment_meta_payment_processor TEXT,
+  payment_meta_reason            TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_txn_account_date ON transactions(account_id, date);
+CREATE INDEX IF NOT EXISTS idx_txn_date ON transactions(date);
+CREATE INDEX IF NOT EXISTS idx_txn_category ON transactions(category_primary);
+CREATE INDEX IF NOT EXISTS idx_txn_merchant_entity ON transactions(merchant_entity_id);
+CREATE INDEX IF NOT EXISTS idx_txn_authorized_date ON transactions(authorized_date);
+CREATE INDEX IF NOT EXISTS idx_acct_item ON accounts(item_id);
+CREATE TABLE IF NOT EXISTS recurring_streams (
+  stream_id            TEXT PRIMARY KEY,
+  item_id              TEXT NOT NULL REFERENCES items(id),
+  account_id           TEXT NOT NULL REFERENCES accounts(id),
+  direction            TEXT NOT NULL,
+  description          TEXT NOT NULL,
+  merchant_name        TEXT,
+  category_primary     TEXT,
+  category_detailed    TEXT,
+  frequency            TEXT NOT NULL,
+  status               TEXT NOT NULL,
+  is_active            INTEGER NOT NULL,
+  first_date           TEXT NOT NULL,
+  last_date            TEXT NOT NULL,
+  predicted_next_date  TEXT,
+  average_amount_cents INTEGER,
+  last_amount_cents    INTEGER,
+  transaction_count    INTEGER NOT NULL,
+  refreshed_at         INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stream_item ON recurring_streams(item_id);
+CREATE INDEX IF NOT EXISTS idx_stream_next ON recurring_streams(predicted_next_date);
+`;
+
+function columnNames(db: Db, table: string): string[] {
+  return (db.pragma(`table_info(${table})`) as Array<{ name: string }>).map(c => c.name);
+}
+
+function tableNames(db: Db): string[] {
+  return (
+    db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name`).all() as Array<{
+      name: string;
+    }>
+  ).map(r => r.name);
+}
+
+describe('schema v6 migrations', () => {
+  it('migrates a v5 database to v6 with rows intact', () => {
+    const dbPath = tmpDbPath('v5');
+    const raw = new Database(dbPath);
+    raw.pragma('foreign_keys = ON');
+    raw.exec(V5_SCHEMA);
+    raw.pragma('user_version = 5');
+    raw.exec(`
+      INSERT INTO items (id, access_token, institution, institution_id, cursor, created_at, consented_products)
+      VALUES ('item_1', 'access-live-tok', 'Chase', 'ins_56', 'cursor_keep', 1, '["transactions"]');
+      INSERT INTO accounts (id, item_id, name, official_name, institution, type, subtype, mask,
+                            iso_currency_code, available_balance_cents, current_balance_cents, last_synced_at)
+      VALUES ('acc_1', 'item_1', 'Checking', 'Total Checking', 'Chase', 'depository', 'checking', '1111',
+              'USD', 50000, 50000, 123);
+      INSERT INTO transactions (id, account_id, date, description, amount_cents, status, payment_channel)
+      VALUES ('t1', 'acc_1', '2026-08-01', 'COFFEE', 450, 'posted', 'in store');
+      INSERT INTO recurring_streams (stream_id, item_id, account_id, direction, description,
+                                     frequency, status, is_active, first_date, last_date,
+                                     transaction_count, refreshed_at)
+      VALUES ('s1', 'item_1', 'acc_1', 'outflow', 'NETFLIX', 'MONTHLY', 'MATURE', 1,
+              '2026-01-15', '2026-08-15', 8, 1000);
+    `);
+    raw.close();
+
+    const db = openDb(dbPath, 'sandbox');
+
+    expect(db.pragma('user_version', { simple: true })).toBe(6);
+    expect(columnNames(db, 'accounts')).toContain('limit_cents');
+    expect(columnNames(db, 'items')).toContain('liabilities_refreshed_at');
+    expect(tableNames(db)).toEqual(expect.arrayContaining([
+      'liability_mortgage',
+      'liability_credit',
+      'liability_credit_apr',
+    ]));
+
+    const item = db.prepare('SELECT * FROM items WHERE id = ?').get('item_1') as {
+      access_token: string;
+      cursor: string;
+    };
+    expect(item.access_token).toBe('access-live-tok');
+    expect(item.cursor).toBe('cursor_keep');
+    const account = db.prepare('SELECT * FROM accounts WHERE id = ?').get('acc_1') as {
+      current_balance_cents: number;
+      limit_cents: number | null;
+    };
+    expect(account.current_balance_cents).toBe(50_000);
+    expect(account.limit_cents).toBeNull();
+    expect(db.prepare('SELECT COUNT(*) AS n FROM transactions').get() as { n: number }).toEqual({
+      n: 1,
+    });
+    expect(
+      db.prepare('SELECT COUNT(*) AS n FROM recurring_streams').get() as { n: number },
+    ).toEqual({ n: 1 });
+  });
+
+  it('is a no-op against an already-v6 database', () => {
+    const dbPath = tmpDbPath('v6');
+    const first = openDb(dbPath, 'sandbox');
+    first
+      .prepare(
+        `INSERT INTO items (id, access_token, institution, institution_id, cursor, created_at, consented_products)
+         VALUES ('item_1', 'tok', 'Chase', 'ins_56', NULL, 1, NULL)`,
+      )
+      .run();
+    first.close();
+
+    const second = openDb(dbPath, 'sandbox');
+    expect(second.pragma('user_version', { simple: true })).toBe(6);
+    expect(
+      (second.prepare('SELECT id FROM items').all() as Array<{ id: string }>).map(r => r.id),
+    ).toEqual(['item_1']);
+    expect(columnNames(second, 'accounts')).toContain('limit_cents');
+  });
+
+  it('leaves user_version unchanged when a migration statement fails', () => {
+    const dbPath = tmpDbPath('broken-v5');
+    const raw = new Database(dbPath);
+    // Version 5 with meta+items but no accounts: the first ALTER TABLE must
+    // fail, and the version stamp must not advance — a half-migrated file is
+    // unopenable. meta must exist so openDb's environment stamp isn't the
+    // failure we catch.
+    raw.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE items (id TEXT PRIMARY KEY)
+    `);
+    raw.pragma('user_version = 5');
+    raw.close();
+
+    expect(() => openDb(dbPath, 'sandbox')).toThrow(/no such table/i);
+
+    const check = new Database(dbPath);
+    expect(check.pragma('user_version', { simple: true })).toBe(5);
+    check.close();
+  });
+
+  it('stamps a fresh database at v6 from SCHEMA, not via the migration loop', () => {
+    const db = openDb(':memory:', 'sandbox');
+    expect(db.pragma('user_version', { simple: true })).toBe(6);
+    expect(columnNames(db, 'accounts')).toContain('limit_cents');
+    expect(columnNames(db, 'items')).toContain('liabilities_refreshed_at');
+    expect(columnNames(db, 'liability_mortgage')).toContain('interest_rate_percentage');
+    expect(columnNames(db, 'liability_credit')).toContain('purchase_apr_percentage');
+    expect(columnNames(db, 'liability_credit_apr')).toContain('apr_percentage');
+    // APR has no primary key: promotional `special` rates can repeat.
+    const pk = (
+      db.pragma('table_info(liability_credit_apr)') as Array<{ name: string; pk: number }>
+    ).filter(c => c.pk > 0);
+    expect(pk).toEqual([]);
   });
 });
 

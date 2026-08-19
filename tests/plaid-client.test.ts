@@ -1,12 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import type { LinkTokenCreateRequest } from 'plaid';
-import type { TransactionsRecurringGetResponse, TransactionsRefreshResponse } from 'plaid';
+import type {
+  LiabilitiesGetResponse,
+  TransactionsRecurringGetResponse,
+  TransactionsRefreshResponse,
+} from 'plaid';
 import {
   CONSENTED_PRODUCTS,
   PlaidApiError,
   PlaidClient,
   isConsentRequired,
+  isNoLiabilityAccounts,
   isProductNotReady,
+  isProductUnsupported,
   isRateLimited,
   isReauthRequired,
   toPlaidApiError,
@@ -104,6 +110,30 @@ describe('error classification', () => {
     expect(isReauthRequired(new Error('x'))).toBe(false);
     expect(isRateLimited(new Error('x'))).toBe(false);
     expect(isProductNotReady(new Error('x'))).toBe(false);
+    expect(isNoLiabilityAccounts(new Error('x'))).toBe(false);
+    expect(isProductUnsupported(new Error('x'))).toBe(false);
+  });
+
+  it('classifies NO_LIABILITY_ACCOUNTS', () => {
+    const error = toPlaidApiError(
+      wireError(400, { error_code: 'NO_LIABILITY_ACCOUNTS', error_type: 'ITEM_ERROR' }),
+      'x',
+    );
+    expect(isNoLiabilityAccounts(error)).toBe(true);
+    expect(isConsentRequired(error)).toBe(false);
+    expect(isProductUnsupported(error)).toBe(false);
+  });
+
+  it('classifies PRODUCTS_NOT_SUPPORTED as unsupported, and still as consent-required', () => {
+    // isConsentRequired matches this code for recurring's benefit. Callers that
+    // distinguish the two MUST check isProductUnsupported first.
+    const error = toPlaidApiError(
+      wireError(400, { error_code: 'PRODUCTS_NOT_SUPPORTED', error_type: 'ITEM_ERROR' }),
+      'x',
+    );
+    expect(isProductUnsupported(error)).toBe(true);
+    expect(isConsentRequired(error)).toBe(true);
+    expect(isNoLiabilityAccounts(error)).toBe(false);
   });
 });
 
@@ -473,6 +503,81 @@ describe('getRecurringStreams', () => {
     );
 
     await expect(client.getRecurringStreams('access-tok')).rejects.toSatisfy(isConsentRequired);
+  });
+});
+
+describe('getLiabilities', () => {
+  const emptyResponse = {
+    accounts: [],
+    item: {},
+    liabilities: { credit: null, mortgage: null, student: null },
+    request_id: 'r',
+  } as unknown as LiabilitiesGetResponse;
+
+  it('returns the raw response', async () => {
+    const client = clientWithStub(
+      {
+        liabilitiesGet: async () => ({ data: emptyResponse }),
+      },
+      [],
+    );
+
+    const result = await client.getLiabilities('access-tok');
+
+    expect(result.request_id).toBe('r');
+    expect(result.liabilities.mortgage).toBeNull();
+  });
+
+  it('requests the whole Item, not a subset of accounts', async () => {
+    let seen: Record<string, unknown> | undefined;
+    const client = clientWithStub(
+      {
+        liabilitiesGet: async (req: Record<string, unknown>) => {
+          seen = req;
+          return { data: emptyResponse };
+        },
+      },
+      [],
+    );
+
+    await client.getLiabilities('access-tok');
+
+    expect(seen).toEqual({ access_token: 'access-tok' });
+    expect(seen).not.toHaveProperty('options');
+  });
+
+  it('surfaces NO_LIABILITY_ACCOUNTS as a classifiable error', async () => {
+    const client = clientWithStub(
+      {
+        liabilitiesGet: async () => {
+          throw wireError(400, {
+            error_code: 'NO_LIABILITY_ACCOUNTS',
+            error_type: 'ITEM_ERROR',
+            error_message: 'no liability accounts',
+          });
+        },
+      },
+      [],
+    );
+
+    await expect(client.getLiabilities('access-tok')).rejects.toSatisfy(isNoLiabilityAccounts);
+  });
+
+  it('surfaces PRODUCTS_NOT_SUPPORTED as a classifiable error', async () => {
+    const client = clientWithStub(
+      {
+        liabilitiesGet: async () => {
+          throw wireError(400, {
+            error_code: 'PRODUCTS_NOT_SUPPORTED',
+            error_type: 'ITEM_ERROR',
+            error_message: 'not supported',
+          });
+        },
+      },
+      [],
+    );
+
+    await expect(client.getLiabilities('access-tok')).rejects.toSatisfy(isProductUnsupported);
   });
 });
 

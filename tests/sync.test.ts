@@ -86,6 +86,11 @@ function fakeApi(
       (async () => {
         throw new Error('unexpected call');
       }),
+    getLiabilities:
+      overrides.getLiabilities ??
+      (async () => {
+        throw new Error('unexpected call');
+      }),
     refreshTransactions:
       overrides.refreshTransactions ??
       (async () => {

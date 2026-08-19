@@ -86,6 +86,18 @@ function fakeApi(
     exchangePublicToken:
       over.exchangePublicToken ??
       (async () => ({ accessToken: 'access-sandbox-tok', itemId: 'item_1' })),
+    getRecurringStreams: over.getRecurringStreams ?? (async () => {
+      throw new Error('unexpected call');
+    }),
+    getLiabilities: over.getLiabilities ?? (async () => {
+      throw new Error('unexpected call');
+    }),
+    refreshTransactions: over.refreshTransactions ?? (async () => {
+      throw new Error('unexpected call');
+    }),
+    itemRemove: over.itemRemove ?? (async () => {
+      throw new Error('unexpected call');
+    }),
   };
   return api as LedgerPlaidApi & {
     linkTokenRequests: Array<{ accessToken?: string | undefined }>;

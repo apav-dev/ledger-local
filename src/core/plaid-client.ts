@@ -8,6 +8,7 @@ import {
   type AccountsGetResponse,
   type ItemPublicTokenExchangeResponse,
   type ItemRemoveResponse,
+  type LiabilitiesGetResponse,
   type LinkTokenCreateRequest,
   type LinkTokenCreateResponse,
   type LinkTokenGetResponse,
@@ -134,6 +135,22 @@ export function isConsentRequired(error: unknown): boolean {
   );
 }
 
+/** Checking-only banks return this. An outcome, not a failure. */
+export function isNoLiabilityAccounts(error: unknown): boolean {
+  return error instanceof PlaidApiError && error.errorCode === 'NO_LIABILITY_ACCOUNTS';
+}
+
+/**
+ * The institution itself cannot serve this product. Consent will not help.
+ *
+ * Check this BEFORE isConsentRequired, which also matches PRODUCTS_NOT_SUPPORTED
+ * so that recurring can treat it as a refused entitlement. Leave that predicate
+ * alone — recurring still depends on the overlap.
+ */
+export function isProductUnsupported(error: unknown): boolean {
+  return error instanceof PlaidApiError && error.errorCode === 'PRODUCTS_NOT_SUPPORTED';
+}
+
 /**
  * Plaid's maximum, and the only safe default.
  *
@@ -210,6 +227,12 @@ export interface LedgerPlaidApi {
    */
   getRecurringStreams(accessToken: string): Promise<TransactionsRecurringGetResponse>;
   /**
+   * A full snapshot of mortgage and credit-card liabilities on the Item. No
+   * cursor, no `removed` list — callers must replace their stored set. There is
+   * no `/liabilities/refresh`; Plaid re-reads on its own daily schedule.
+   */
+  getLiabilities(accessToken: string): Promise<LiabilitiesGetResponse>;
+  /**
    * Asks Plaid to pull from the institution now rather than on its own 1-4x
    * daily schedule. Returns no data — new transactions arrive through the next
    * `/transactions/sync`, and not necessarily immediately.
@@ -256,6 +279,7 @@ export interface PlaidSdk {
   transactionsRecurringGet(req: {
     access_token: string;
   }): Promise<{ data: TransactionsRecurringGetResponse }>;
+  liabilitiesGet(req: { access_token: string }): Promise<{ data: LiabilitiesGetResponse }>;
   transactionsRefresh(req: {
     access_token: string;
   }): Promise<{ data: TransactionsRefreshResponse }>;
@@ -392,6 +416,12 @@ export class PlaidClient implements LedgerPlaidApi {
   getRecurringStreams(accessToken: string): Promise<TransactionsRecurringGetResponse> {
     return this.#call('/transactions/recurring/get', () =>
       this.#api.transactionsRecurringGet({ access_token: accessToken }),
+    );
+  }
+
+  getLiabilities(accessToken: string): Promise<LiabilitiesGetResponse> {
+    return this.#call('/liabilities/get', () =>
+      this.#api.liabilitiesGet({ access_token: accessToken }),
     );
   }
 

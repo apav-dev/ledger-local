@@ -34,6 +34,9 @@ const noApi: LedgerPlaidApi = {
   getRecurringStreams: async () => {
     throw new Error('unexpected call');
   },
+  getLiabilities: async () => {
+    throw new Error('unexpected call');
+  },
   refreshTransactions: async () => {
     throw new Error('unexpected call');
   },

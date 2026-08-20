@@ -16,6 +16,7 @@ import {
   type Db,
 } from '../src/core/db.js';
 import {
+  LIABILITY_CAVEATS,
   listLiabilities,
   refreshLiabilities,
   toLiabilityRows,
@@ -477,5 +478,44 @@ describe('listLiabilities', () => {
   it('reports stale with a null timestamp when nothing has been refreshed', () => {
     const db = seedDb();
     expect(listLiabilities(db, {}, () => NOW).meta).toEqual({ last_synced_at: null, stale: true });
+  });
+});
+
+describe('LIABILITY_CAVEATS', () => {
+  // These ship in `ledger liabilities --json` and `--help`. For a caller driving
+  // the CLI they are the ONLY warning that exists — there is no tool description
+  // to fall back on. Each assertion pins a specific way to state a wrong number,
+  // so trimming the list for brevity fails here instead of silently in front of
+  // a user.
+  const all = LIABILITY_CAVEATS.join(' ');
+
+  it('warns that a percentage is not money', () => {
+    expect(all).toMatch(/6\.125 means 6\.125%/);
+  });
+
+  it('forbids reporting principal reduction as amount paid', () => {
+    expect(all).toMatch(/amount paid/i);
+    expect(all).toMatch(/excludes interest/i);
+  });
+
+  it('warns that escrow_balance is a balance, not a payment', () => {
+    expect(all).toMatch(/escrow_balance is a balance/i);
+  });
+
+  it('warns that ytd figures reset each January', () => {
+    expect(all).toMatch(/reset every January/i);
+    expect(all).toMatch(/not lifetime totals/i);
+  });
+
+  it('warns that a positive liability balance is money owed', () => {
+    expect(all).toMatch(/positive balance is money OWED/);
+  });
+
+  it('warns that loan_term is free text and must not be parsed', () => {
+    expect(all).toMatch(/never parsed/i);
+  });
+
+  it('says outstanding_principal is joined and must not be derived', () => {
+    expect(all).toMatch(/do not derive it from\s+origination_principal_amount/i);
   });
 });

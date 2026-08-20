@@ -21,6 +21,7 @@ import { createTtyPrompter, type Prompter } from './prompt.js';
 // same ones the MCP server uses, so the two frontends cannot disagree.
 import { listRecurring, refreshRecurring, type RecurringRefreshResult } from '../core/recurring.js';
 import {
+  LIABILITY_CAVEATS,
   listLiabilities,
   refreshLiabilities,
   type LiabilitiesRefreshResult,
@@ -682,6 +683,12 @@ const liabilities = program
   .description('mortgages and credit cards (from local db)')
   .option('--kind <mortgage|credit>', 'only mortgages, or only credit cards')
   .option('--account <id>', 'only this account')
+  .addHelpText(
+    'after',
+    '\nReading these numbers correctly:\n' +
+      LIABILITY_CAVEATS.map(c => `  - ${c}`).join('\n') +
+      '\n',
+  )
   .action(
     withCtx(program, ({ db, json }, opts: { kind?: string; account?: string }) => {
       if (opts.kind !== undefined && opts.kind !== 'mortgage' && opts.kind !== 'credit') {
@@ -693,7 +700,14 @@ const liabilities = program
       });
 
       if (json) {
-        process.stdout.write(JSON.stringify(liabilitiesResultView(raw), null, 2) + '\n');
+        // `notes` rides along on every response because the only consumer of
+        // this output is a script or an agent, and neither reads a man page at
+        // call time. The MCP server puts the same warnings in its tool
+        // description; a CLI caller has no equivalent channel.
+        process.stdout.write(
+          JSON.stringify({ ...liabilitiesResultView(raw), notes: LIABILITY_CAVEATS }, null, 2) +
+            '\n',
+        );
         return;
       }
       if (raw.mortgages.length === 0 && raw.credit.length === 0) {

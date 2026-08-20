@@ -315,6 +315,20 @@ There is no forced refresh. Plaid re-reads liabilities about once a day on its
 own schedule, and `ledger sync --force` does not change that. A stale figure
 stays stale until tomorrow.
 
+### Reading the numbers
+
+Several of these fields mean something narrower than their name suggests, and
+each one is a way to state a confidently wrong figure. `ledger liabilities
+--help` lists them, and `ledger liabilities --json` carries the same list in a
+`notes` array on every response — a script or an agent reading the JSON never
+sees a help page, so the warnings travel with the data.
+
+The one worth repeating here: **`origination_principal_amount` minus
+`outstanding_principal` is not "what I have paid".** It is principal reduction,
+and it excludes interest — which on a young mortgage is most of what was
+actually paid. Plaid does not report total paid, and it cannot be derived from
+this data.
+
 HELOC and auto loans are not covered. Student loans are not stored yet.
 
 ## State

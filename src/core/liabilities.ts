@@ -42,6 +42,40 @@ const UNSUPPORTED_HINT =
   'This institution does not support Liabilities. Consent will not help and there is ' +
   'nothing to retry — Plaid coverage varies by bank.';
 
+/**
+ * Semantics a caller cannot infer from the field names, each one a way to state
+ * a confidently wrong number.
+ *
+ * Emitted verbatim in `ledger liabilities --json` and shown by
+ * `ledger liabilities --help`. The MCP `list_liabilities` description carries the
+ * same warnings in prose — an agent driving the CLI never sees a tool
+ * description, and that is the only surface some callers have. Change both
+ * together.
+ */
+export const LIABILITY_CAVEATS: readonly string[] = [
+  'Amounts are dollars. Every *_percentage field is a percentage, not money: 6.125 means 6.125%.',
+  'outstanding_principal is joined from the account balance, not from Plaid\'s mortgage ' +
+    'payload. Null means the institution reported none — do not derive it from ' +
+    'origination_principal_amount.',
+  'Do NOT report origination_principal_amount minus outstanding_principal as "amount paid". ' +
+    'That is principal reduction only and excludes interest, which on a mortgage is most of ' +
+    'what has actually been paid. Plaid does not report total paid and it cannot be derived ' +
+    'from this data.',
+  'escrow_balance is a balance held on the borrower\'s behalf, never a payment amount. Never ' +
+    'add it to next_monthly_payment and never subtract it from principal.',
+  'next_monthly_payment is the servicer\'s stated next payment and is not guaranteed to ' +
+    'include escrow, taxes, or insurance. It is not "total housing cost".',
+  'ytd_interest_paid and ytd_principal_paid are calendar-year-to-date as of refreshed_at and ' +
+    'reset every January. They are not lifetime totals.',
+  'loan_term and loan_type_description are unenumerated free text from the servicer ' +
+    '("30 year", "360 months") — display only, never parsed. maturity_date is the ' +
+    'machine-readable payoff date.',
+  'On loan and credit accounts a positive balance is money OWED — subtract it from net worth, ' +
+    'never add it.',
+  'Plaid re-reads liabilities about once a day and it cannot be forced, so a stale figure ' +
+    'stays stale until tomorrow. Say so rather than retrying.',
+];
+
 /** SQLite has no boolean. Null stays null so "unreported" does not become "no". */
 function sqliteBool(value: boolean | null | undefined): number | null {
   if (value === null || value === undefined) return null;

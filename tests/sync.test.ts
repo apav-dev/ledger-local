@@ -306,8 +306,27 @@ describe('toAccountUpsert', () => {
       institution: 'Chase',
       available_balance_cents: 10_000,
       current_balance_cents: 12_000,
+      limit_cents: null,
       iso_currency_code: 'USD',
     });
+  });
+
+  it('maps balances.limit to limit_cents', () => {
+    const row = toAccountUpsert(
+      account('acc_card', {
+        type: 'credit' as AccountBase['type'],
+        balances: {
+          available: 1000,
+          current: 200,
+          limit: 5000,
+          iso_currency_code: 'USD',
+          unofficial_currency_code: null,
+        },
+      }),
+      'item_1',
+      'Chase',
+    );
+    expect(row.limit_cents).toBe(500_000);
   });
 
   it('falls back to the unofficial currency code', () => {

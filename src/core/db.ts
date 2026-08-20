@@ -21,9 +21,15 @@ export interface ItemRow {
    * surfacing a raw Plaid rejection. Treat a mismatch as this column being stale.
    */
   consented_products: string | null;
+  /**
+   * When `/liabilities/get` last succeeded (including NO_LIABILITY_ACCOUNTS).
+   * Stamped on the Item rather than derived from liability rows: a bank with
+   * legitimately zero liabilities would otherwise read as permanently stale.
+   */
+  liabilities_refreshed_at: number | null;
 }
 
-export type ItemUpsert = Omit<ItemRow, 'cursor'>;
+export type ItemUpsert = Omit<ItemRow, 'cursor' | 'liabilities_refreshed_at'>;
 
 export interface AccountRow {
   id: string;
@@ -41,6 +47,8 @@ export interface AccountRow {
   available_balance_cents: number | null;
   /** Integer cents. Null when the institution does not report the balance. */
   current_balance_cents: number | null;
+  /** Credit limit. Null for depository and loan accounts, which have none. */
+  limit_cents: number | null;
   last_synced_at: number | null;
 }
 
@@ -481,9 +489,10 @@ export function openDb(dbPath: string, environment: PlaidEnvironment): Db {
 // ---------------------------------------------------------------- items
 
 /**
- * Upserting an Item deliberately leaves `cursor` and `consented_products`
- * alone. Re-linking the same Item through update mode must not discard sync
- * progress or erase consent just established.
+ * Upserting an Item deliberately leaves `cursor`, `consented_products`, and
+ * `liabilities_refreshed_at` alone. Re-linking the same Item through update
+ * mode must not discard sync progress, erase consent, or make a fresh
+ * liabilities snapshot look never-fetched.
  */
 export function upsertItem(db: Db, row: ItemUpsert): void {
   db.prepare(
@@ -561,8 +570,13 @@ export function removeItem(db: Db, itemId: string): RemovedItemCounts {
         .prepare(`DELETE FROM transactions WHERE account_id IN (${placeholders})`)
         .run(...batch).changes;
     }
-    // Streams reference both items and accounts; clear them before accounts.
+    // Streams and liabilities reference both items and accounts; clear them
+    // before accounts. Skipping this aborts on the foreign key *after*
+    // `/item/remove` has already destroyed the Item at Plaid.
     db.prepare('DELETE FROM recurring_streams WHERE item_id = ?').run(itemId);
+    db.prepare('DELETE FROM liability_credit_apr WHERE item_id = ?').run(itemId);
+    db.prepare('DELETE FROM liability_credit WHERE item_id = ?').run(itemId);
+    db.prepare('DELETE FROM liability_mortgage WHERE item_id = ?').run(itemId);
     const accounts = db.prepare('DELETE FROM accounts WHERE item_id = ?').run(itemId).changes;
     db.prepare('DELETE FROM items WHERE id = ?').run(itemId);
     return { accounts, transactions };
@@ -584,10 +598,12 @@ export function upsertAccount(db: Db, row: AccountUpsert): void {
   db.prepare(
     `INSERT INTO accounts (
        id, item_id, name, official_name, institution, type, subtype, mask,
-       iso_currency_code, available_balance_cents, current_balance_cents, last_synced_at
+       iso_currency_code, available_balance_cents, current_balance_cents, limit_cents,
+       last_synced_at
      ) VALUES (
        @id, @item_id, @name, @official_name, @institution, @type, @subtype, @mask,
-       @iso_currency_code, @available_balance_cents, @current_balance_cents, NULL
+       @iso_currency_code, @available_balance_cents, @current_balance_cents, @limit_cents,
+       NULL
      )
      ON CONFLICT(id) DO UPDATE SET
        item_id                 = excluded.item_id,
@@ -599,7 +615,8 @@ export function upsertAccount(db: Db, row: AccountUpsert): void {
        mask                    = excluded.mask,
        iso_currency_code       = excluded.iso_currency_code,
        available_balance_cents = excluded.available_balance_cents,
-       current_balance_cents   = excluded.current_balance_cents`,
+       current_balance_cents   = excluded.current_balance_cents,
+       limit_cents             = excluded.limit_cents`,
   ).run(row);
 }
 
@@ -862,5 +879,185 @@ export function lastRecurringRefreshAt(db: Db): number | null {
   const row = db.prepare('SELECT MIN(refreshed_at) AS oldest FROM recurring_streams').get() as {
     oldest: number | null;
   };
+  return row.oldest;
+}
+
+// ---------------------------------------------------------- liabilities
+
+export interface MortgageLiabilityRow {
+  account_id: string;
+  item_id: string;
+  refreshed_at: number;
+  /** Percentage points, not money. 6.125 means 6.125%. Never pass through toCents. */
+  interest_rate_percentage: number | null;
+  interest_rate_type: string | null;
+  escrow_balance_cents: number | null;
+  current_late_fee_cents: number | null;
+  /** SQLite has no boolean: 0, 1, or null when the servicer did not report it. */
+  has_pmi: number | null;
+  has_prepayment_penalty: number | null;
+  last_payment_amount_cents: number | null;
+  last_payment_date: string | null;
+  loan_type_description: string | null;
+  loan_term: string | null;
+  maturity_date: string | null;
+  next_monthly_payment_cents: number | null;
+  next_payment_due_date: string | null;
+  origination_date: string | null;
+  origination_principal_amount_cents: number | null;
+  past_due_amount_cents: number | null;
+  property_street: string | null;
+  property_city: string | null;
+  property_region: string | null;
+  property_postal_code: string | null;
+  property_country: string | null;
+  ytd_interest_paid_cents: number | null;
+  ytd_principal_paid_cents: number | null;
+}
+
+export interface CreditLiabilityRow {
+  account_id: string;
+  item_id: string;
+  refreshed_at: number;
+  /** SQLite has no boolean: 0, 1, or null when the issuer did not report it. */
+  is_overdue: number | null;
+  last_payment_amount_cents: number | null;
+  last_payment_date: string | null;
+  last_statement_issue_date: string | null;
+  last_statement_balance_cents: number | null;
+  minimum_payment_amount_cents: number | null;
+  next_payment_due_date: string | null;
+  /** Percentage points, denormalised from aprs where apr_type is purchase_apr. */
+  purchase_apr_percentage: number | null;
+}
+
+export interface CreditAprRow {
+  account_id: string;
+  item_id: string;
+  refreshed_at: number;
+  apr_type: string;
+  /** Percentage points, not money. 6.125 means 6.125%. */
+  apr_percentage: number;
+  balance_subject_to_apr_cents: number | null;
+  interest_charge_amount_cents: number | null;
+}
+
+export interface LiabilitySnapshot {
+  mortgage: readonly MortgageLiabilityRow[];
+  credit: readonly CreditLiabilityRow[];
+  aprs: readonly CreditAprRow[];
+}
+
+/**
+ * Replaces every liability for the Item across all three tables and stamps
+ * `items.liabilities_refreshed_at`, in one transaction.
+ *
+ * Replace, never merge: the endpoint has no cursor and no removed list, so a
+ * card absent from a response has been closed. The empty snapshot is NOT a
+ * special case — a bank that closed its last card answers NO_LIABILITY_ACCOUNTS,
+ * and returning early would keep the dead card forever.
+ *
+ * Returns how many parent liability rows (mortgage + credit) were deleted.
+ * APR rows are children of credit and are not counted separately.
+ */
+export function replaceLiabilities(
+  db: Db,
+  itemId: string,
+  snap: LiabilitySnapshot,
+  refreshedAt: number,
+): number {
+  const run = db.transaction((): number => {
+    db.prepare('DELETE FROM liability_credit_apr WHERE item_id = ?').run(itemId);
+    const deletedCredit = db
+      .prepare('DELETE FROM liability_credit WHERE item_id = ?')
+      .run(itemId).changes;
+    const deletedMortgage = db
+      .prepare('DELETE FROM liability_mortgage WHERE item_id = ?')
+      .run(itemId).changes;
+
+    const insMortgage = db.prepare(
+      `INSERT INTO liability_mortgage (
+         account_id, item_id, refreshed_at, interest_rate_percentage, interest_rate_type,
+         escrow_balance_cents, current_late_fee_cents, has_pmi, has_prepayment_penalty,
+         last_payment_amount_cents, last_payment_date, loan_type_description, loan_term,
+         maturity_date, next_monthly_payment_cents, next_payment_due_date, origination_date,
+         origination_principal_amount_cents, past_due_amount_cents, property_street,
+         property_city, property_region, property_postal_code, property_country,
+         ytd_interest_paid_cents, ytd_principal_paid_cents
+       ) VALUES (
+         @account_id, @item_id, @refreshed_at, @interest_rate_percentage, @interest_rate_type,
+         @escrow_balance_cents, @current_late_fee_cents, @has_pmi, @has_prepayment_penalty,
+         @last_payment_amount_cents, @last_payment_date, @loan_type_description, @loan_term,
+         @maturity_date, @next_monthly_payment_cents, @next_payment_due_date, @origination_date,
+         @origination_principal_amount_cents, @past_due_amount_cents, @property_street,
+         @property_city, @property_region, @property_postal_code, @property_country,
+         @ytd_interest_paid_cents, @ytd_principal_paid_cents
+       )`,
+    );
+    for (const row of snap.mortgage) insMortgage.run(row);
+
+    const insCredit = db.prepare(
+      `INSERT INTO liability_credit (
+         account_id, item_id, refreshed_at, is_overdue, last_payment_amount_cents,
+         last_payment_date, last_statement_issue_date, last_statement_balance_cents,
+         minimum_payment_amount_cents, next_payment_due_date, purchase_apr_percentage
+       ) VALUES (
+         @account_id, @item_id, @refreshed_at, @is_overdue, @last_payment_amount_cents,
+         @last_payment_date, @last_statement_issue_date, @last_statement_balance_cents,
+         @minimum_payment_amount_cents, @next_payment_due_date, @purchase_apr_percentage
+       )`,
+    );
+    for (const row of snap.credit) insCredit.run(row);
+
+    const insApr = db.prepare(
+      `INSERT INTO liability_credit_apr (
+         account_id, item_id, refreshed_at, apr_type, apr_percentage,
+         balance_subject_to_apr_cents, interest_charge_amount_cents
+       ) VALUES (
+         @account_id, @item_id, @refreshed_at, @apr_type, @apr_percentage,
+         @balance_subject_to_apr_cents, @interest_charge_amount_cents
+       )`,
+    );
+    for (const row of snap.aprs) insApr.run(row);
+
+    db.prepare('UPDATE items SET liabilities_refreshed_at = ? WHERE id = ?').run(
+      refreshedAt,
+      itemId,
+    );
+    return deletedMortgage + deletedCredit;
+  });
+  return run();
+}
+
+export function listMortgageRows(db: Db): MortgageLiabilityRow[] {
+  return db
+    .prepare('SELECT * FROM liability_mortgage ORDER BY account_id')
+    .all() as MortgageLiabilityRow[];
+}
+
+export function listCreditRows(db: Db): CreditLiabilityRow[] {
+  return db
+    .prepare('SELECT * FROM liability_credit ORDER BY account_id')
+    .all() as CreditLiabilityRow[];
+}
+
+export function listCreditAprRows(db: Db): CreditAprRow[] {
+  return db
+    .prepare(
+      `SELECT * FROM liability_credit_apr
+       ORDER BY account_id, apr_type, apr_percentage`,
+    )
+    .all() as CreditAprRow[];
+}
+
+/**
+ * Oldest Item-level liabilities stamp, or null when no Item has been refreshed.
+ * SQLite MIN ignores NULLs, so never-fetched Items do not make a fetched empty
+ * snapshot look permanently stale.
+ */
+export function lastLiabilitiesRefreshAt(db: Db): number | null {
+  const row = db
+    .prepare('SELECT MIN(liabilities_refreshed_at) AS oldest FROM items')
+    .get() as { oldest: number | null };
   return row.oldest;
 }

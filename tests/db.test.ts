@@ -15,10 +15,15 @@ import {
   listAccountRows,
   listItems,
   listRecurringStreamRows,
+  listMortgageRows,
+  listCreditRows,
+  listCreditAprRows,
+  lastLiabilitiesRefreshAt,
   openDb,
   readMeta,
   removeItem,
   replaceRecurringStreams,
+  replaceLiabilities,
   setAccountSynced,
   setItemConsent,
   setItemCursor,
@@ -26,12 +31,15 @@ import {
   upsertItem,
   upsertTransactions,
   type AccountUpsert,
+  type CreditAprRow,
+  type CreditLiabilityRow,
   type Db,
   type ItemUpsert,
+  type MortgageLiabilityRow,
   type RecurringStreamRow,
   type TransactionRow,
 } from '../src/core/db.js';
-import { fullTransactionRow, seedDb } from './helpers.js';
+import { addLoanAccount, fullTransactionRow, seedDb } from './helpers.js';
 
 function tmpDbPath(name: string): string {
   tmpDbDir = mkdtempSync(join(tmpdir(), 'ledger-test-'));
@@ -59,6 +67,7 @@ const account: AccountUpsert = {
   iso_currency_code: 'USD',
   available_balance_cents: 120_050, // $1,200.50
   current_balance_cents: 125_000, // $1,250.00
+  limit_cents: null,
 };
 
 /**
@@ -137,6 +146,13 @@ describe('items', () => {
     expect(getItem(db, 'item_1')?.cursor).toBe('cursor_abc');
   });
 
+  it('preserves liabilities_refreshed_at across re-upsert', () => {
+    const db = freshDb();
+    replaceLiabilities(db, 'item_1', { mortgage: [], credit: [], aprs: [] }, 9_000);
+    upsertItem(db, { ...item, access_token: 'access-sandbox-rotated' });
+    expect(getItem(db, 'item_1')?.liabilities_refreshed_at).toBe(9_000);
+  });
+
   it('resolves an account to its owning item', () => {
     const db = freshDb();
     expect(itemIdForAccount(db, 'acc_1')).toBe('item_1');
@@ -159,6 +175,13 @@ describe('accounts', () => {
     const rows = listAccountRows(db);
     expect(rows[0]?.available_balance_cents).toBe(90_000);
     expect(rows[0]?.last_synced_at).toBe(123456);
+  });
+
+  it('writes and updates limit_cents', () => {
+    const db = freshDb();
+    expect(listAccountRows(db)[0]?.limit_cents).toBeNull();
+    upsertAccount(db, { ...account, limit_cents: 500_000 });
+    expect(listAccountRows(db)[0]?.limit_cents).toBe(500_000);
   });
 
   it('accepts null mask and null currency, which Plaid does return', () => {
@@ -458,6 +481,7 @@ describe('schema v3', () => {
       id: 'acc_1', item_id: 'item_1', name: 'Checking', official_name: null,
       institution: 'Chase', type: 'depository', subtype: 'checking', mask: '1111',
       iso_currency_code: 'USD', available_balance_cents: 0, current_balance_cents: 0,
+      limit_cents: null,
     });
     return db;
   }
@@ -829,6 +853,7 @@ describe('recurring_streams', () => {
       id: 'acc_3', item_id: 'item_2', name: 'Amex', official_name: null,
       institution: 'Amex', type: 'credit', subtype: 'credit card', mask: '3333',
       iso_currency_code: 'USD', available_balance_cents: null, current_balance_cents: null,
+      limit_cents: null,
     });
     replaceRecurringStreams(db, 'item_1', [stream('s1')]);
     replaceRecurringStreams(db, 'item_2', [
@@ -861,5 +886,205 @@ describe('recurring_streams', () => {
     removeItem(db, 'item_1');
 
     expect(listRecurringStreamRows(db)).toEqual([]);
+  });
+});
+
+describe('liabilities', () => {
+  const mortgage = (
+    accountId: string,
+    over: Partial<MortgageLiabilityRow> = {},
+  ): MortgageLiabilityRow => ({
+    account_id: accountId,
+    item_id: 'item_1',
+    refreshed_at: 1000,
+    interest_rate_percentage: 6.125,
+    interest_rate_type: 'fixed',
+    escrow_balance_cents: 250_000,
+    current_late_fee_cents: null,
+    has_pmi: 0,
+    has_prepayment_penalty: 0,
+    last_payment_amount_cents: 210_000,
+    last_payment_date: '2026-08-01',
+    loan_type_description: 'conventional',
+    loan_term: '30 year',
+    maturity_date: '2054-05-01',
+    next_monthly_payment_cents: 210_000,
+    next_payment_due_date: '2026-09-01',
+    origination_date: '2024-05-01',
+    origination_principal_amount_cents: 40_000_000,
+    past_due_amount_cents: null,
+    property_street: '1 Main St',
+    property_city: 'Austin',
+    property_region: 'TX',
+    property_postal_code: '78701',
+    property_country: 'US',
+    ytd_interest_paid_cents: 800_000,
+    ytd_principal_paid_cents: 400_000,
+    ...over,
+  });
+
+  const credit = (
+    accountId: string,
+    over: Partial<CreditLiabilityRow> = {},
+  ): CreditLiabilityRow => ({
+    account_id: accountId,
+    item_id: 'item_1',
+    refreshed_at: 1000,
+    is_overdue: 0,
+    last_payment_amount_cents: 15_000,
+    last_payment_date: '2026-08-05',
+    last_statement_issue_date: '2026-08-01',
+    last_statement_balance_cents: 80_000,
+    minimum_payment_amount_cents: 3500,
+    next_payment_due_date: '2026-08-25',
+    purchase_apr_percentage: 18.24,
+    ...over,
+  });
+
+  const apr = (
+    accountId: string,
+    over: Partial<CreditAprRow> = {},
+  ): CreditAprRow => ({
+    account_id: accountId,
+    item_id: 'item_1',
+    refreshed_at: 1000,
+    apr_type: 'purchase_apr',
+    apr_percentage: 18.24,
+    balance_subject_to_apr_cents: 80_000,
+    interest_charge_amount_cents: 1200,
+    ...over,
+  });
+
+  it('replaces the whole set for an item rather than merging', () => {
+    const db = seedDb();
+    addLoanAccount(db, 'acc_loan');
+    replaceLiabilities(
+      db,
+      'item_1',
+      { mortgage: [mortgage('acc_loan')], credit: [credit('acc_2')], aprs: [apr('acc_2')] },
+      1000,
+    );
+
+    // Plaid returns a full snapshot with no `removed` list, so a card missing
+    // from a later response has been closed and must disappear locally.
+    const removed = replaceLiabilities(
+      db,
+      'item_1',
+      { mortgage: [mortgage('acc_loan')], credit: [], aprs: [] },
+      2000,
+    );
+
+    expect(removed).toBe(2);
+    expect(listMortgageRows(db).map(r => r.account_id)).toEqual(['acc_loan']);
+    expect(listCreditRows(db)).toEqual([]);
+    expect(listCreditAprRows(db)).toEqual([]);
+  });
+
+  it("leaves another item's liabilities alone", () => {
+    const db = seedDb();
+    addLoanAccount(db, 'acc_loan');
+    upsertItem(db, {
+      id: 'item_2', access_token: 'tok2', institution: 'Rocket',
+      institution_id: 'ins_117288', created_at: 2, consented_products: null,
+    });
+    upsertAccount(db, {
+      id: 'acc_rocket', item_id: 'item_2', name: 'Mortgage', official_name: null,
+      institution: 'Rocket', type: 'loan', subtype: 'mortgage', mask: '4444',
+      iso_currency_code: 'USD', available_balance_cents: null, current_balance_cents: 10_000_000,
+      limit_cents: null,
+    });
+    replaceLiabilities(
+      db,
+      'item_1',
+      { mortgage: [mortgage('acc_loan')], credit: [], aprs: [] },
+      1000,
+    );
+    replaceLiabilities(
+      db,
+      'item_2',
+      { mortgage: [mortgage('acc_rocket', { item_id: 'item_2' })], credit: [], aprs: [] },
+      1000,
+    );
+
+    replaceLiabilities(db, 'item_1', { mortgage: [], credit: [], aprs: [] }, 2000);
+
+    expect(listMortgageRows(db).map(r => r.account_id)).toEqual(['acc_rocket']);
+  });
+
+  it('treats the empty snapshot as a real replace and stamps the Item', () => {
+    const db = seedDb();
+    replaceLiabilities(db, 'item_1', { mortgage: [], credit: [credit('acc_2')], aprs: [] }, 1000);
+
+    const removed = replaceLiabilities(
+      db,
+      'item_1',
+      { mortgage: [], credit: [], aprs: [] },
+      5000,
+    );
+
+    expect(removed).toBe(1);
+    expect(listCreditRows(db)).toEqual([]);
+    expect(getItem(db, 'item_1')?.liabilities_refreshed_at).toBe(5000);
+    // A checking-only bank that has been refreshed must not read as permanently stale.
+    expect(lastLiabilitiesRefreshAt(db)).toBe(5000);
+  });
+
+  it('stores 6.125 as a REAL percentage, not as cents', () => {
+    const db = seedDb();
+    addLoanAccount(db, 'acc_loan');
+    replaceLiabilities(
+      db,
+      'item_1',
+      { mortgage: [mortgage('acc_loan', { interest_rate_percentage: 6.125 })], credit: [], aprs: [] },
+      1000,
+    );
+
+    const row = listMortgageRows(db)[0];
+    expect(row?.interest_rate_percentage).toBe(6.125);
+    const stored = db
+      .prepare(
+        "SELECT typeof(interest_rate_percentage) AS t FROM liability_mortgage WHERE account_id = 'acc_loan'",
+      )
+      .get() as { t: string };
+    expect(stored.t).toBe('real');
+  });
+
+  it('keeps two special APR rates rather than collapsing them on apr_type', () => {
+    const db = seedDb();
+    replaceLiabilities(
+      db,
+      'item_1',
+      {
+        mortgage: [],
+        credit: [credit('acc_2')],
+        aprs: [
+          apr('acc_2', { apr_type: 'special', apr_percentage: 0 }),
+          apr('acc_2', { apr_type: 'special', apr_percentage: 1.99 }),
+        ],
+      },
+      1000,
+    );
+
+    expect(listCreditAprRows(db).map(r => r.apr_percentage)).toEqual([0, 1.99]);
+  });
+
+  it("drops an item's liabilities when the item is removed", () => {
+    const db = seedDb();
+    addLoanAccount(db, 'acc_loan');
+    replaceLiabilities(
+      db,
+      'item_1',
+      {
+        mortgage: [mortgage('acc_loan')],
+        credit: [credit('acc_2')],
+        aprs: [apr('acc_2'), apr('acc_2', { apr_type: 'cash_apr', apr_percentage: 24.99 })],
+      },
+      1000,
+    );
+
+    expect(() => removeItem(db, 'item_1')).not.toThrow();
+    expect(listMortgageRows(db)).toEqual([]);
+    expect(listCreditRows(db)).toEqual([]);
+    expect(listCreditAprRows(db)).toEqual([]);
   });
 });

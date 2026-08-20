@@ -29,6 +29,7 @@ function account(id: string, itemId: string): AccountUpsert {
     iso_currency_code: 'USD',
     available_balance_cents: 1000,
     current_balance_cents: 1000,
+    limit_cents: null,
   };
 }
 

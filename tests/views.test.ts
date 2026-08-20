@@ -25,6 +25,7 @@ function accountRow(over: Partial<AccountRow> & Pick<AccountRow, 'id'>): Account
     iso_currency_code: 'USD',
     available_balance_cents: 50_000,
     current_balance_cents: 50_000,
+    limit_cents: null,
     last_synced_at: NOW,
     ...over,
   };
@@ -52,6 +53,16 @@ describe('accountsResultView', () => {
     const checking = view.accounts.find(a => a.id === 'acc_1');
     expect(checking?.available_balance).toBe(500);
     expect(checking?.current_balance).toBe(500);
+    expect(checking?.limit).toBeNull();
+  });
+
+  it('converts limit_cents to dollars under limit, not through a percentage path', () => {
+    const view = accountsResultView({
+      accounts: [accountRow({ id: 'acc_2', type: 'credit', limit_cents: 500_000 })],
+      meta: META,
+    });
+    expect(view.accounts[0]?.limit).toBe(5000);
+    expect(view.accounts[0]).not.toHaveProperty('limit_cents');
   });
 
   it('keeps a negative balance negative', () => {

@@ -115,6 +115,7 @@ export function toAccountUpsert(
       a.balances.iso_currency_code ?? a.balances.unofficial_currency_code ?? null,
     available_balance_cents: toCentsOrNull(a.balances.available),
     current_balance_cents: toCentsOrNull(a.balances.current),
+    limit_cents: toCentsOrNull(a.balances.limit),
   };
 }
 

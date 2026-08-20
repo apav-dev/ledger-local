@@ -19,10 +19,11 @@ import type { QueryMeta, SpendingGroup } from './queries.js';
 
 export type AccountView = Omit<
   AccountRow,
-  'available_balance_cents' | 'current_balance_cents'
+  'available_balance_cents' | 'current_balance_cents' | 'limit_cents'
 > & {
   available_balance: number | null;
   current_balance: number | null;
+  limit: number | null;
 };
 
 export type TransactionView = Omit<TransactionRow, 'amount_cents'> & { amount: number };
@@ -42,6 +43,7 @@ export function accountView(row: AccountRow): AccountView {
     iso_currency_code: row.iso_currency_code,
     available_balance: centsToDollarsOrNull(row.available_balance_cents),
     current_balance: centsToDollarsOrNull(row.current_balance_cents),
+    limit: centsToDollarsOrNull(row.limit_cents),
     last_synced_at: row.last_synced_at,
   };
 }

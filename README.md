@@ -86,6 +86,8 @@ ledger spending --from --to       rollups (local)
 ledger categories                 known categories with counts (local)
 ledger recurring [filters]        recurring bills, subs, income (local)
 ledger recurring refresh          refetch streams from Plaid
+ledger liabilities [filters]      mortgages and credit cards (local)
+ledger liabilities refresh        refetch liabilities from Plaid
 ```
 
 Every command takes `--json` except `init`, which is a conversation rather than a
@@ -124,8 +126,8 @@ create a **second** Item for the same bank and consume another of your 10 slots.
 
 Linking requests consent for `liabilities` and `investments` in addition to
 `transactions`. Consent is free — Plaid bills a product only once you call its
-endpoints — and it is requested up front so a future feature does not need a
-browser trip per bank to turn on.
+endpoints. `ledger liabilities` is the liabilities reader; investments are
+still unused.
 
 (`recurring_transactions` and `transactions_refresh` are in the SDK's `Products`
 enum but Plaid rejects them inside `additional_consented_products`; see the
@@ -237,13 +239,19 @@ similar — the app, not whoever was actually paid.
 
 Register `dist/mcp/index.js` as a stdio MCP server. Tools: `list_accounts`,
 `list_transactions`, `list_categories`, `spending_summary`, `list_recurring`,
-`refresh_recurring`, `sync`, `auth_status`. Setup, linking, and repairing a bank
-are CLI-only — all three need a human at a terminal or a browser.
+`refresh_recurring`, `list_liabilities`, `refresh_liabilities`, `sync`,
+`auth_status`. Setup, linking, and repairing a bank are CLI-only — all three
+need a human at a terminal or a browser.
 
 `list_recurring` reads the local stream cache; `refresh_recurring` refetches it
 from the banks. If Plaid refuses the product, the error says so and points at the
 Plaid dashboard — Recurring Transactions is enabled per `client_id`, not granted
 per Item, so `ledger auth consent` cannot fix it.
+
+`list_liabilities` reads the local mortgage and credit-card cache;
+`refresh_liabilities` refetches it. Unlike recurring, a `needsConsent` result
+here is grantable with `ledger auth consent <item_id>`. A checking-only bank
+returning no liability accounts is a normal success, not an error.
 
 ## Recurring streams
 
@@ -276,6 +284,39 @@ cursor and no removals list. A stream that vanishes between refreshes has ended.
 Streams are recalculated by Plaid on its own schedule, so a newly linked account
 may show none until the next periodic update or a `ledger sync --force`.
 
+## Liabilities
+
+Plaid's Liabilities product covers **mortgages and credit cards**. It is the
+source for rate, term, escrow, next payment, remaining principal, APR, and due
+date — none of which exist on the transactions table. `ledger liabilities refresh`
+fetches them; `ledger liabilities` reads the local copy.
+
+```
+ledger liabilities --kind mortgage
+ledger liabilities --kind credit --account <id>
+ledger liabilities refresh
+```
+
+Mortgage remaining principal comes from the **account** in the same Plaid
+response, not from the mortgage object. If it is missing, it is missing — it is
+not derived from the origination amount.
+
+Every `*_percentage` field is a percentage, not money: `6.125` means 6.125%.
+
+**The liability set is a snapshot, not a running total.** Each refresh replaces
+every liability for a bank, because Plaid's endpoint returns a full picture with
+no cursor and no removals list. A card that vanishes has been closed.
+
+`NO_LIABILITY_ACCOUNTS` is a normal outcome for checking-only banks, not an
+error. The refresh still writes an empty snapshot so a closed card does not
+linger.
+
+There is no forced refresh. Plaid re-reads liabilities about once a day on its
+own schedule, and `ledger sync --force` does not change that. A stale figure
+stays stale until tomorrow.
+
+HELOC and auto loans are not covered. Student loans are not stored yet.
+
 ## State
 
 - Config: `~/.config/ledger/config.json` (chmod 600; contains your Plaid secret)
@@ -292,15 +333,14 @@ working. Two copies syncing independently will diverge — each carries its own
 cursor and there is no merge.
 
 The database records its schema version in `PRAGMA user_version` and the Plaid
-environment that created it. There are no migrations: a database written by an
-incompatible build, or opened under the wrong environment, is rejected with an
-explanation rather than silently misbehaving.
+environment that created it. Additive migrations (new tables and columns) run
+forward automatically. A database from a *newer* build, or opened under the
+wrong environment, is rejected with an explanation rather than silently
+misbehaving.
 
-That policy is only tenable while nothing is linked. Deleting the database
-destroys the access tokens, which is the one thing Plaid will not resend, so
-once you have real banks connected a rejected database means re-linking all of
-them and spending Item slots. **Make schema changes before you link, or expect
-to pay for them.**
+Deleting the database destroys the access tokens, which is the one thing Plaid
+will not resend. On the Trial plan a removed Item does not return its slot, so
+"delete it and re-link" is not a recoverable instruction.
 
 ## How sync works
 

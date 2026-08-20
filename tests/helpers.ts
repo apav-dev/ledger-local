@@ -5,6 +5,7 @@ import {
   upsertAccount,
   upsertItem,
   upsertTransactions,
+  type AccountUpsert,
   type Db,
   type TransactionRow,
 } from '../src/core/db.js';
@@ -62,11 +63,13 @@ export function seedDb(): Db {
     id: 'acc_1', item_id: 'item_1', name: 'Checking', official_name: 'Total Checking',
     institution: 'Chase', type: 'depository', subtype: 'checking', mask: '1111',
     iso_currency_code: 'USD', available_balance_cents: 50_000, current_balance_cents: 50_000,
+    limit_cents: null,
   });
   upsertAccount(db, {
     id: 'acc_2', item_id: 'item_1', name: 'Card', official_name: 'Freedom Card',
     institution: 'Chase', type: 'credit', subtype: 'credit card', mask: '2222',
-    iso_currency_code: 'USD', available_balance_cents: -20_000, current_balance_cents: -20_000,
+    iso_currency_code: 'USD', available_balance_cents: 20_000, current_balance_cents: 20_000,
+    limit_cents: null,
   });
   setAccountSynced(db, 'acc_1', NOW - 60_000); // 1 min ago
   setAccountSynced(db, 'acc_2', NOW - 60_000);
@@ -117,4 +120,23 @@ export function seedDb(): Db {
               account_id: 'acc_2', date: '2026-08-08' }),
   ]);
   return db;
+}
+
+/** Extra loan account for liabilities tests. Does not change seedDb's account count. */
+export function addLoanAccount(db: Db, id: string, over: Partial<AccountUpsert> = {}): void {
+  upsertAccount(db, {
+    id,
+    item_id: 'item_1',
+    name: 'Mortgage',
+    official_name: null,
+    institution: 'Chase',
+    type: 'loan',
+    subtype: 'mortgage',
+    mask: '9999',
+    iso_currency_code: 'USD',
+    available_balance_cents: null,
+    current_balance_cents: 30_000_000,
+    limit_cents: null,
+    ...over,
+  });
 }

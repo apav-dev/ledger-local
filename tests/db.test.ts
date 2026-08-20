@@ -15,10 +15,15 @@ import {
   listAccountRows,
   listItems,
   listRecurringStreamRows,
+  listMortgageRows,
+  listCreditRows,
+  listCreditAprRows,
+  lastLiabilitiesRefreshAt,
   openDb,
   readMeta,
   removeItem,
   replaceRecurringStreams,
+  replaceLiabilities,
   setAccountSynced,
   setItemConsent,
   setItemCursor,
@@ -26,15 +31,19 @@ import {
   upsertItem,
   upsertTransactions,
   type AccountUpsert,
+  type CreditAprRow,
+  type CreditLiabilityRow,
   type Db,
   type ItemUpsert,
+  type MortgageLiabilityRow,
   type RecurringStreamRow,
   type TransactionRow,
 } from '../src/core/db.js';
-import { fullTransactionRow, seedDb } from './helpers.js';
+import { addLoanAccount, fullTransactionRow, seedDb } from './helpers.js';
 
 function tmpDbPath(name: string): string {
-  return join(mkdtempSync(join(tmpdir(), 'ledger-test-')), `${name}.db`);
+  tmpDbDir = mkdtempSync(join(tmpdir(), 'ledger-test-'));
+  return join(tmpDbDir, `${name}.db`);
 }
 
 const item: ItemUpsert = {
@@ -58,6 +67,7 @@ const account: AccountUpsert = {
   iso_currency_code: 'USD',
   available_balance_cents: 120_050, // $1,200.50
   current_balance_cents: 125_000, // $1,250.00
+  limit_cents: null,
 };
 
 /**
@@ -136,6 +146,13 @@ describe('items', () => {
     expect(getItem(db, 'item_1')?.cursor).toBe('cursor_abc');
   });
 
+  it('preserves liabilities_refreshed_at across re-upsert', () => {
+    const db = freshDb();
+    replaceLiabilities(db, 'item_1', { mortgage: [], credit: [], aprs: [] }, 9_000);
+    upsertItem(db, { ...item, access_token: 'access-sandbox-rotated' });
+    expect(getItem(db, 'item_1')?.liabilities_refreshed_at).toBe(9_000);
+  });
+
   it('resolves an account to its owning item', () => {
     const db = freshDb();
     expect(itemIdForAccount(db, 'acc_1')).toBe('item_1');
@@ -158,6 +175,13 @@ describe('accounts', () => {
     const rows = listAccountRows(db);
     expect(rows[0]?.available_balance_cents).toBe(90_000);
     expect(rows[0]?.last_synced_at).toBe(123456);
+  });
+
+  it('writes and updates limit_cents', () => {
+    const db = freshDb();
+    expect(listAccountRows(db)[0]?.limit_cents).toBeNull();
+    upsertAccount(db, { ...account, limit_cents: 500_000 });
+    expect(listAccountRows(db)[0]?.limit_cents).toBe(500_000);
   });
 
   it('accepts null mask and null currency, which Plaid does return', () => {
@@ -336,7 +360,7 @@ describe('openDb', () => {
 
   it('stamps a schema version on a fresh database', () => {
     const db = openDb(':memory:', 'sandbox');
-    expect(db.pragma('user_version', { simple: true })).toBe(5);
+    expect(db.pragma('user_version', { simple: true })).toBe(6);
   });
 
   it('reopens its own database without complaint', () => {
@@ -359,6 +383,8 @@ describe('openDb', () => {
     legacy.close(); // user_version stays 0
 
     expect(() => openDb(dbPath, 'sandbox')).toThrow(/older build with an incompatible schema/);
+    expect(() => openDb(dbPath, 'sandbox')).toThrow(/re-link/i);
+    expect(() => openDb(dbPath, 'sandbox')).toThrow(/does not return/);
   });
 
   it('refuses a database written by a newer build', () => {
@@ -455,6 +481,7 @@ describe('schema v3', () => {
       id: 'acc_1', item_id: 'item_1', name: 'Checking', official_name: null,
       institution: 'Chase', type: 'depository', subtype: 'checking', mask: '1111',
       iso_currency_code: 'USD', available_balance_cents: 0, current_balance_cents: 0,
+      limit_cents: null,
     });
     return db;
   }
@@ -550,11 +577,241 @@ describe('item consent', () => {
     expect(itemConsent(db, 'item_1')).toEqual(['liabilities']);
   });
 
-  it('stamps a fresh database at version 5 with the table present', () => {
+  it('stamps a fresh database at version 6 with the table present', () => {
     const db = openDb(':memory:', 'sandbox');
 
-    expect(db.pragma('user_version', { simple: true })).toBe(5);
+    expect(db.pragma('user_version', { simple: true })).toBe(6);
     expect(() => db.prepare('SELECT * FROM recurring_streams').all()).not.toThrow();
+  });
+});
+
+/**
+ * Frozen copy of schema v5. After SCHEMA in db.ts moves to v6, this is the only
+ * remaining definition of what a production database actually looks like today.
+ */
+const V5_SCHEMA = `
+CREATE TABLE IF NOT EXISTS meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS items (
+  id              TEXT PRIMARY KEY,
+  access_token    TEXT NOT NULL,
+  institution     TEXT NOT NULL,
+  institution_id  TEXT,
+  cursor          TEXT,
+  created_at      INTEGER NOT NULL,
+  consented_products TEXT
+);
+CREATE TABLE IF NOT EXISTS accounts (
+  id                      TEXT PRIMARY KEY,
+  item_id                 TEXT NOT NULL REFERENCES items(id),
+  name                    TEXT NOT NULL,
+  official_name           TEXT,
+  institution             TEXT NOT NULL,
+  type                    TEXT NOT NULL,
+  subtype                 TEXT,
+  mask                    TEXT,
+  iso_currency_code       TEXT,
+  available_balance_cents INTEGER,
+  current_balance_cents   INTEGER,
+  last_synced_at          INTEGER
+);
+CREATE TABLE IF NOT EXISTS transactions (
+  id                             TEXT PRIMARY KEY,
+  account_id                     TEXT NOT NULL REFERENCES accounts(id),
+  date                           TEXT NOT NULL,
+  description                    TEXT NOT NULL,
+  amount_cents                   INTEGER NOT NULL,
+  category_primary               TEXT,
+  category_detailed              TEXT,
+  counterparty                   TEXT,
+  status                         TEXT NOT NULL,
+  pending_transaction_id         TEXT,
+  authorized_date                TEXT,
+  authorized_datetime            TEXT,
+  datetime                       TEXT,
+  original_description           TEXT,
+  iso_currency_code              TEXT,
+  unofficial_currency_code       TEXT,
+  category_confidence            TEXT,
+  category_icon_url              TEXT,
+  merchant_entity_id             TEXT,
+  website                        TEXT,
+  logo_url                       TEXT,
+  counterparty_type              TEXT,
+  counterparties_json            TEXT,
+  payment_channel                TEXT NOT NULL,
+  transaction_code               TEXT,
+  check_number                   TEXT,
+  account_owner                  TEXT,
+  location_address               TEXT,
+  location_city                  TEXT,
+  location_region                TEXT,
+  location_postal_code           TEXT,
+  location_country               TEXT,
+  location_lat                   REAL,
+  location_lon                   REAL,
+  location_store_number          TEXT,
+  payment_meta_reference_number  TEXT,
+  payment_meta_ppd_id            TEXT,
+  payment_meta_payee             TEXT,
+  payment_meta_by_order_of       TEXT,
+  payment_meta_payer             TEXT,
+  payment_meta_payment_method    TEXT,
+  payment_meta_payment_processor TEXT,
+  payment_meta_reason            TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_txn_account_date ON transactions(account_id, date);
+CREATE INDEX IF NOT EXISTS idx_txn_date ON transactions(date);
+CREATE INDEX IF NOT EXISTS idx_txn_category ON transactions(category_primary);
+CREATE INDEX IF NOT EXISTS idx_txn_merchant_entity ON transactions(merchant_entity_id);
+CREATE INDEX IF NOT EXISTS idx_txn_authorized_date ON transactions(authorized_date);
+CREATE INDEX IF NOT EXISTS idx_acct_item ON accounts(item_id);
+CREATE TABLE IF NOT EXISTS recurring_streams (
+  stream_id            TEXT PRIMARY KEY,
+  item_id              TEXT NOT NULL REFERENCES items(id),
+  account_id           TEXT NOT NULL REFERENCES accounts(id),
+  direction            TEXT NOT NULL,
+  description          TEXT NOT NULL,
+  merchant_name        TEXT,
+  category_primary     TEXT,
+  category_detailed    TEXT,
+  frequency            TEXT NOT NULL,
+  status               TEXT NOT NULL,
+  is_active            INTEGER NOT NULL,
+  first_date           TEXT NOT NULL,
+  last_date            TEXT NOT NULL,
+  predicted_next_date  TEXT,
+  average_amount_cents INTEGER,
+  last_amount_cents    INTEGER,
+  transaction_count    INTEGER NOT NULL,
+  refreshed_at         INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stream_item ON recurring_streams(item_id);
+CREATE INDEX IF NOT EXISTS idx_stream_next ON recurring_streams(predicted_next_date);
+`;
+
+function columnNames(db: Db, table: string): string[] {
+  return (db.pragma(`table_info(${table})`) as Array<{ name: string }>).map(c => c.name);
+}
+
+function tableNames(db: Db): string[] {
+  return (
+    db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name`).all() as Array<{
+      name: string;
+    }>
+  ).map(r => r.name);
+}
+
+describe('schema v6 migrations', () => {
+  it('migrates a v5 database to v6 with rows intact', () => {
+    const dbPath = tmpDbPath('v5');
+    const raw = new Database(dbPath);
+    raw.pragma('foreign_keys = ON');
+    raw.exec(V5_SCHEMA);
+    raw.pragma('user_version = 5');
+    raw.exec(`
+      INSERT INTO items (id, access_token, institution, institution_id, cursor, created_at, consented_products)
+      VALUES ('item_1', 'access-live-tok', 'Chase', 'ins_56', 'cursor_keep', 1, '["transactions"]');
+      INSERT INTO accounts (id, item_id, name, official_name, institution, type, subtype, mask,
+                            iso_currency_code, available_balance_cents, current_balance_cents, last_synced_at)
+      VALUES ('acc_1', 'item_1', 'Checking', 'Total Checking', 'Chase', 'depository', 'checking', '1111',
+              'USD', 50000, 50000, 123);
+      INSERT INTO transactions (id, account_id, date, description, amount_cents, status, payment_channel)
+      VALUES ('t1', 'acc_1', '2026-08-01', 'COFFEE', 450, 'posted', 'in store');
+      INSERT INTO recurring_streams (stream_id, item_id, account_id, direction, description,
+                                     frequency, status, is_active, first_date, last_date,
+                                     transaction_count, refreshed_at)
+      VALUES ('s1', 'item_1', 'acc_1', 'outflow', 'NETFLIX', 'MONTHLY', 'MATURE', 1,
+              '2026-01-15', '2026-08-15', 8, 1000);
+    `);
+    raw.close();
+
+    const db = openDb(dbPath, 'sandbox');
+
+    expect(db.pragma('user_version', { simple: true })).toBe(6);
+    expect(columnNames(db, 'accounts')).toContain('limit_cents');
+    expect(columnNames(db, 'items')).toContain('liabilities_refreshed_at');
+    expect(tableNames(db)).toEqual(expect.arrayContaining([
+      'liability_mortgage',
+      'liability_credit',
+      'liability_credit_apr',
+    ]));
+
+    const item = db.prepare('SELECT * FROM items WHERE id = ?').get('item_1') as {
+      access_token: string;
+      cursor: string;
+    };
+    expect(item.access_token).toBe('access-live-tok');
+    expect(item.cursor).toBe('cursor_keep');
+    const account = db.prepare('SELECT * FROM accounts WHERE id = ?').get('acc_1') as {
+      current_balance_cents: number;
+      limit_cents: number | null;
+    };
+    expect(account.current_balance_cents).toBe(50_000);
+    expect(account.limit_cents).toBeNull();
+    expect(db.prepare('SELECT COUNT(*) AS n FROM transactions').get() as { n: number }).toEqual({
+      n: 1,
+    });
+    expect(
+      db.prepare('SELECT COUNT(*) AS n FROM recurring_streams').get() as { n: number },
+    ).toEqual({ n: 1 });
+  });
+
+  it('is a no-op against an already-v6 database', () => {
+    const dbPath = tmpDbPath('v6');
+    const first = openDb(dbPath, 'sandbox');
+    first
+      .prepare(
+        `INSERT INTO items (id, access_token, institution, institution_id, cursor, created_at, consented_products)
+         VALUES ('item_1', 'tok', 'Chase', 'ins_56', NULL, 1, NULL)`,
+      )
+      .run();
+    first.close();
+
+    const second = openDb(dbPath, 'sandbox');
+    expect(second.pragma('user_version', { simple: true })).toBe(6);
+    expect(
+      (second.prepare('SELECT id FROM items').all() as Array<{ id: string }>).map(r => r.id),
+    ).toEqual(['item_1']);
+    expect(columnNames(second, 'accounts')).toContain('limit_cents');
+  });
+
+  it('leaves user_version unchanged when a migration statement fails', () => {
+    const dbPath = tmpDbPath('broken-v5');
+    const raw = new Database(dbPath);
+    // Version 5 with meta+items but no accounts: the first ALTER TABLE must
+    // fail, and the version stamp must not advance — a half-migrated file is
+    // unopenable. meta must exist so openDb's environment stamp isn't the
+    // failure we catch.
+    raw.exec(`
+      CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      CREATE TABLE items (id TEXT PRIMARY KEY)
+    `);
+    raw.pragma('user_version = 5');
+    raw.close();
+
+    expect(() => openDb(dbPath, 'sandbox')).toThrow(/no such table/i);
+
+    const check = new Database(dbPath);
+    expect(check.pragma('user_version', { simple: true })).toBe(5);
+    check.close();
+  });
+
+  it('stamps a fresh database at v6 from SCHEMA, not via the migration loop', () => {
+    const db = openDb(':memory:', 'sandbox');
+    expect(db.pragma('user_version', { simple: true })).toBe(6);
+    expect(columnNames(db, 'accounts')).toContain('limit_cents');
+    expect(columnNames(db, 'items')).toContain('liabilities_refreshed_at');
+    expect(columnNames(db, 'liability_mortgage')).toContain('interest_rate_percentage');
+    expect(columnNames(db, 'liability_credit')).toContain('purchase_apr_percentage');
+    expect(columnNames(db, 'liability_credit_apr')).toContain('apr_percentage');
+    // APR has no primary key: promotional `special` rates can repeat.
+    const pk = (
+      db.pragma('table_info(liability_credit_apr)') as Array<{ name: string; pk: number }>
+    ).filter(c => c.pk > 0);
+    expect(pk).toEqual([]);
   });
 });
 
@@ -596,6 +853,7 @@ describe('recurring_streams', () => {
       id: 'acc_3', item_id: 'item_2', name: 'Amex', official_name: null,
       institution: 'Amex', type: 'credit', subtype: 'credit card', mask: '3333',
       iso_currency_code: 'USD', available_balance_cents: null, current_balance_cents: null,
+      limit_cents: null,
     });
     replaceRecurringStreams(db, 'item_1', [stream('s1')]);
     replaceRecurringStreams(db, 'item_2', [
@@ -628,5 +886,205 @@ describe('recurring_streams', () => {
     removeItem(db, 'item_1');
 
     expect(listRecurringStreamRows(db)).toEqual([]);
+  });
+});
+
+describe('liabilities', () => {
+  const mortgage = (
+    accountId: string,
+    over: Partial<MortgageLiabilityRow> = {},
+  ): MortgageLiabilityRow => ({
+    account_id: accountId,
+    item_id: 'item_1',
+    refreshed_at: 1000,
+    interest_rate_percentage: 6.125,
+    interest_rate_type: 'fixed',
+    escrow_balance_cents: 250_000,
+    current_late_fee_cents: null,
+    has_pmi: 0,
+    has_prepayment_penalty: 0,
+    last_payment_amount_cents: 210_000,
+    last_payment_date: '2026-08-01',
+    loan_type_description: 'conventional',
+    loan_term: '30 year',
+    maturity_date: '2054-05-01',
+    next_monthly_payment_cents: 210_000,
+    next_payment_due_date: '2026-09-01',
+    origination_date: '2024-05-01',
+    origination_principal_amount_cents: 40_000_000,
+    past_due_amount_cents: null,
+    property_street: '1 Main St',
+    property_city: 'Austin',
+    property_region: 'TX',
+    property_postal_code: '78701',
+    property_country: 'US',
+    ytd_interest_paid_cents: 800_000,
+    ytd_principal_paid_cents: 400_000,
+    ...over,
+  });
+
+  const credit = (
+    accountId: string,
+    over: Partial<CreditLiabilityRow> = {},
+  ): CreditLiabilityRow => ({
+    account_id: accountId,
+    item_id: 'item_1',
+    refreshed_at: 1000,
+    is_overdue: 0,
+    last_payment_amount_cents: 15_000,
+    last_payment_date: '2026-08-05',
+    last_statement_issue_date: '2026-08-01',
+    last_statement_balance_cents: 80_000,
+    minimum_payment_amount_cents: 3500,
+    next_payment_due_date: '2026-08-25',
+    purchase_apr_percentage: 18.24,
+    ...over,
+  });
+
+  const apr = (
+    accountId: string,
+    over: Partial<CreditAprRow> = {},
+  ): CreditAprRow => ({
+    account_id: accountId,
+    item_id: 'item_1',
+    refreshed_at: 1000,
+    apr_type: 'purchase_apr',
+    apr_percentage: 18.24,
+    balance_subject_to_apr_cents: 80_000,
+    interest_charge_amount_cents: 1200,
+    ...over,
+  });
+
+  it('replaces the whole set for an item rather than merging', () => {
+    const db = seedDb();
+    addLoanAccount(db, 'acc_loan');
+    replaceLiabilities(
+      db,
+      'item_1',
+      { mortgage: [mortgage('acc_loan')], credit: [credit('acc_2')], aprs: [apr('acc_2')] },
+      1000,
+    );
+
+    // Plaid returns a full snapshot with no `removed` list, so a card missing
+    // from a later response has been closed and must disappear locally.
+    const removed = replaceLiabilities(
+      db,
+      'item_1',
+      { mortgage: [mortgage('acc_loan')], credit: [], aprs: [] },
+      2000,
+    );
+
+    expect(removed).toBe(2);
+    expect(listMortgageRows(db).map(r => r.account_id)).toEqual(['acc_loan']);
+    expect(listCreditRows(db)).toEqual([]);
+    expect(listCreditAprRows(db)).toEqual([]);
+  });
+
+  it("leaves another item's liabilities alone", () => {
+    const db = seedDb();
+    addLoanAccount(db, 'acc_loan');
+    upsertItem(db, {
+      id: 'item_2', access_token: 'tok2', institution: 'Rocket',
+      institution_id: 'ins_117288', created_at: 2, consented_products: null,
+    });
+    upsertAccount(db, {
+      id: 'acc_rocket', item_id: 'item_2', name: 'Mortgage', official_name: null,
+      institution: 'Rocket', type: 'loan', subtype: 'mortgage', mask: '4444',
+      iso_currency_code: 'USD', available_balance_cents: null, current_balance_cents: 10_000_000,
+      limit_cents: null,
+    });
+    replaceLiabilities(
+      db,
+      'item_1',
+      { mortgage: [mortgage('acc_loan')], credit: [], aprs: [] },
+      1000,
+    );
+    replaceLiabilities(
+      db,
+      'item_2',
+      { mortgage: [mortgage('acc_rocket', { item_id: 'item_2' })], credit: [], aprs: [] },
+      1000,
+    );
+
+    replaceLiabilities(db, 'item_1', { mortgage: [], credit: [], aprs: [] }, 2000);
+
+    expect(listMortgageRows(db).map(r => r.account_id)).toEqual(['acc_rocket']);
+  });
+
+  it('treats the empty snapshot as a real replace and stamps the Item', () => {
+    const db = seedDb();
+    replaceLiabilities(db, 'item_1', { mortgage: [], credit: [credit('acc_2')], aprs: [] }, 1000);
+
+    const removed = replaceLiabilities(
+      db,
+      'item_1',
+      { mortgage: [], credit: [], aprs: [] },
+      5000,
+    );
+
+    expect(removed).toBe(1);
+    expect(listCreditRows(db)).toEqual([]);
+    expect(getItem(db, 'item_1')?.liabilities_refreshed_at).toBe(5000);
+    // A checking-only bank that has been refreshed must not read as permanently stale.
+    expect(lastLiabilitiesRefreshAt(db)).toBe(5000);
+  });
+
+  it('stores 6.125 as a REAL percentage, not as cents', () => {
+    const db = seedDb();
+    addLoanAccount(db, 'acc_loan');
+    replaceLiabilities(
+      db,
+      'item_1',
+      { mortgage: [mortgage('acc_loan', { interest_rate_percentage: 6.125 })], credit: [], aprs: [] },
+      1000,
+    );
+
+    const row = listMortgageRows(db)[0];
+    expect(row?.interest_rate_percentage).toBe(6.125);
+    const stored = db
+      .prepare(
+        "SELECT typeof(interest_rate_percentage) AS t FROM liability_mortgage WHERE account_id = 'acc_loan'",
+      )
+      .get() as { t: string };
+    expect(stored.t).toBe('real');
+  });
+
+  it('keeps two special APR rates rather than collapsing them on apr_type', () => {
+    const db = seedDb();
+    replaceLiabilities(
+      db,
+      'item_1',
+      {
+        mortgage: [],
+        credit: [credit('acc_2')],
+        aprs: [
+          apr('acc_2', { apr_type: 'special', apr_percentage: 0 }),
+          apr('acc_2', { apr_type: 'special', apr_percentage: 1.99 }),
+        ],
+      },
+      1000,
+    );
+
+    expect(listCreditAprRows(db).map(r => r.apr_percentage)).toEqual([0, 1.99]);
+  });
+
+  it("drops an item's liabilities when the item is removed", () => {
+    const db = seedDb();
+    addLoanAccount(db, 'acc_loan');
+    replaceLiabilities(
+      db,
+      'item_1',
+      {
+        mortgage: [mortgage('acc_loan')],
+        credit: [credit('acc_2')],
+        aprs: [apr('acc_2'), apr('acc_2', { apr_type: 'cash_apr', apr_percentage: 24.99 })],
+      },
+      1000,
+    );
+
+    expect(() => removeItem(db, 'item_1')).not.toThrow();
+    expect(listMortgageRows(db)).toEqual([]);
+    expect(listCreditRows(db)).toEqual([]);
+    expect(listCreditAprRows(db)).toEqual([]);
   });
 });

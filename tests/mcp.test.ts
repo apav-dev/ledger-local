@@ -3,10 +3,10 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { describe, expect, it } from 'vitest';
 import type { LedgerConfig } from '../src/core/config.js';
 import type { Db } from '../src/core/db.js';
-import { replaceRecurringStreams } from '../src/core/db.js';
+import { replaceLiabilities, replaceRecurringStreams } from '../src/core/db.js';
 import { PlaidApiError, type LedgerPlaidApi } from '../src/core/plaid-client.js';
 import { buildMcpServer } from '../src/mcp/server.js';
-import { NOW, seedDb } from './helpers.js';
+import { NOW, addLoanAccount, seedDb } from './helpers.js';
 
 const cfg: LedgerConfig = {
   clientId: 'cid_test',
@@ -34,6 +34,9 @@ const noApi: LedgerPlaidApi = {
   getRecurringStreams: async () => {
     throw new Error('unexpected call');
   },
+  getLiabilities: async () => {
+    throw new Error('unexpected call');
+  },
   refreshTransactions: async () => {
     throw new Error('unexpected call');
   },
@@ -58,15 +61,17 @@ function textOf(result: unknown): unknown {
 }
 
 describe('mcp server', () => {
-  it('exposes the eight tools', async () => {
+  it('exposes the ten tools', async () => {
     const client = await connect();
     const { tools } = await client.listTools();
     expect(tools.map(t => t.name).sort()).toEqual([
       'auth_status',
       'list_accounts',
       'list_categories',
+      'list_liabilities',
       'list_recurring',
       'list_transactions',
+      'refresh_liabilities',
       'refresh_recurring',
       'spending_summary',
       'sync',
@@ -79,6 +84,15 @@ describe('mcp server', () => {
     const data = textOf(result) as { accounts: unknown[]; meta: { stale: boolean } };
     expect(data.accounts).toHaveLength(2);
     expect(typeof data.meta.stale).toBe('boolean');
+  });
+
+  it('tells the model that a positive loan or credit balance is money owed', async () => {
+    const client = await connect();
+    const { tools } = await client.listTools();
+    const description = tools.find(t => t.name === 'list_accounts')?.description ?? '';
+    expect(description).toMatch(/OWED/i);
+    expect(description).toMatch(/subtract/i);
+    expect(description).toMatch(/never add/i);
   });
 
   it('list_transactions applies filters', async () => {
@@ -407,6 +421,81 @@ describe('mcp server', () => {
       ) as { streams: unknown[] };
 
       expect(result.streams).toEqual([]);
+    });
+  });
+
+  describe('list_liabilities', () => {
+    it('returns 6.125 as a percentage and joined outstanding principal as dollars', async () => {
+      const db = seedDb();
+      addLoanAccount(db, 'acc_loan');
+      replaceLiabilities(
+        db,
+        'item_1',
+        {
+          mortgage: [
+            {
+              account_id: 'acc_loan',
+              item_id: 'item_1',
+              refreshed_at: NOW,
+              interest_rate_percentage: 6.125,
+              interest_rate_type: 'fixed',
+              escrow_balance_cents: 250_000,
+              current_late_fee_cents: null,
+              has_pmi: 0,
+              has_prepayment_penalty: null,
+              last_payment_amount_cents: null,
+              last_payment_date: null,
+              loan_type_description: null,
+              loan_term: '30 year',
+              maturity_date: '2054-05-01',
+              next_monthly_payment_cents: 210_000,
+              next_payment_due_date: '2026-09-01',
+              origination_date: null,
+              origination_principal_amount_cents: 40_000_000,
+              past_due_amount_cents: null,
+              property_street: null,
+              property_city: null,
+              property_region: null,
+              property_postal_code: null,
+              property_country: null,
+              ytd_interest_paid_cents: null,
+              ytd_principal_paid_cents: null,
+            },
+          ],
+          credit: [],
+          aprs: [],
+        },
+        NOW,
+      );
+
+      const client = await connect(noApi, db);
+      const result = textOf(await client.callTool({ name: 'list_liabilities', arguments: {} })) as {
+        mortgages: Array<{
+          interest_rate_percentage: number;
+          outstanding_principal: number;
+          escrow_balance: number;
+          has_pmi: boolean | null;
+          has_prepayment_penalty: boolean | null;
+        }>;
+      };
+
+      expect(result.mortgages[0]?.interest_rate_percentage).toBe(6.125);
+      expect(result.mortgages[0]?.outstanding_principal).toBe(300_000);
+      expect(result.mortgages[0]?.escrow_balance).toBe(2500);
+      expect(result.mortgages[0]?.has_pmi).toBe(false);
+      expect(result.mortgages[0]?.has_prepayment_penalty).toBeNull();
+      expect(result.mortgages[0]).not.toHaveProperty('escrow_balance_cents');
+    });
+
+    it('documents that percentages are percentages and principal is joined', async () => {
+      const client = await connect();
+      const { tools } = await client.listTools();
+      const description = tools.find(t => t.name === 'list_liabilities')?.description ?? '';
+      expect(description).toMatch(/6\.125 means 6\.125%/);
+      expect(description).toMatch(/JOINED/i);
+      expect(description).toMatch(/never derive/i);
+      expect(description).toMatch(/escrow_balance is a balance held/i);
+      expect(description).toMatch(/cannot be forced/);
     });
   });
 });

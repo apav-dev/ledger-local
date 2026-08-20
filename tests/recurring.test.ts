@@ -53,6 +53,7 @@ function fakeApi(over: Partial<LedgerPlaidApi> = {}): LedgerPlaidApi {
     exchangePublicToken: unused as never,
     itemRemove: unused as never,
     getRecurringStreams: unused as never,
+    getLiabilities: unused as never,
     refreshTransactions: unused as never,
     ...over,
   };

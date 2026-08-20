@@ -21,9 +21,15 @@ export interface ItemRow {
    * surfacing a raw Plaid rejection. Treat a mismatch as this column being stale.
    */
   consented_products: string | null;
+  /**
+   * When `/liabilities/get` last succeeded (including NO_LIABILITY_ACCOUNTS).
+   * Stamped on the Item rather than derived from liability rows: a bank with
+   * legitimately zero liabilities would otherwise read as permanently stale.
+   */
+  liabilities_refreshed_at: number | null;
 }
 
-export type ItemUpsert = Omit<ItemRow, 'cursor'>;
+export type ItemUpsert = Omit<ItemRow, 'cursor' | 'liabilities_refreshed_at'>;
 
 export interface AccountRow {
   id: string;
@@ -41,6 +47,8 @@ export interface AccountRow {
   available_balance_cents: number | null;
   /** Integer cents. Null when the institution does not report the balance. */
   current_balance_cents: number | null;
+  /** Credit limit. Null for depository and loan accounts, which have none. */
+  limit_cents: number | null;
   last_synced_at: number | null;
 }
 
@@ -140,12 +148,94 @@ export interface SyncPage {
 }
 
 /**
- * Bumped whenever the schema changes. Stored in `PRAGMA user_version` so a
- * database written by an older build is rejected loudly instead of failing later
- * with a confusing missing-column error — `CREATE TABLE IF NOT EXISTS` silently
- * no-ops against an existing table with different columns.
+ * Bumped whenever the schema changes. Stored in `PRAGMA user_version`. Older
+ * databases are upgraded by MIGRATIONS; a database from a newer build is refused.
  */
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
+
+const TBL_LIABILITY_MORTGAGE = `liability_mortgage (
+  account_id                         TEXT PRIMARY KEY REFERENCES accounts(id),
+  item_id                            TEXT NOT NULL REFERENCES items(id),
+  refreshed_at                       INTEGER NOT NULL,
+  interest_rate_percentage           REAL,
+  interest_rate_type                 TEXT,
+  escrow_balance_cents               INTEGER,
+  current_late_fee_cents             INTEGER,
+  has_pmi                            INTEGER,
+  has_prepayment_penalty             INTEGER,
+  last_payment_amount_cents          INTEGER,
+  last_payment_date                  TEXT,
+  loan_type_description              TEXT,
+  loan_term                          TEXT,
+  maturity_date                      TEXT,
+  next_monthly_payment_cents         INTEGER,
+  next_payment_due_date              TEXT,
+  origination_date                   TEXT,
+  origination_principal_amount_cents INTEGER,
+  past_due_amount_cents              INTEGER,
+  property_street                    TEXT,
+  property_city                      TEXT,
+  property_region                    TEXT,
+  property_postal_code               TEXT,
+  property_country                   TEXT,
+  ytd_interest_paid_cents            INTEGER,
+  ytd_principal_paid_cents           INTEGER
+)`;
+
+const TBL_LIABILITY_CREDIT = `liability_credit (
+  account_id                    TEXT PRIMARY KEY REFERENCES accounts(id),
+  item_id                       TEXT NOT NULL REFERENCES items(id),
+  refreshed_at                  INTEGER NOT NULL,
+  is_overdue                    INTEGER,
+  last_payment_amount_cents     INTEGER,
+  last_payment_date             TEXT,
+  last_statement_issue_date     TEXT,
+  last_statement_balance_cents  INTEGER,
+  minimum_payment_amount_cents  INTEGER,
+  next_payment_due_date         TEXT,
+  purchase_apr_percentage       REAL
+)`;
+
+const TBL_LIABILITY_CREDIT_APR = `liability_credit_apr (
+  account_id                    TEXT NOT NULL REFERENCES accounts(id),
+  item_id                       TEXT NOT NULL REFERENCES items(id),
+  refreshed_at                  INTEGER NOT NULL,
+  apr_type                      TEXT NOT NULL,
+  apr_percentage                REAL NOT NULL,
+  balance_subject_to_apr_cents  INTEGER,
+  interest_charge_amount_cents  INTEGER
+)`;
+
+const LIABILITY_INDEXES = [
+  'idx_liability_mortgage_item ON liability_mortgage(item_id)',
+  'idx_liability_credit_item ON liability_credit(item_id)',
+  'idx_liability_credit_apr_item ON liability_credit_apr(item_id)',
+  'idx_liability_credit_apr_account ON liability_credit_apr(account_id)',
+] as const;
+
+/**
+ * Forward-only additive migrations, applied in order from the database's
+ * user_version up to SCHEMA_VERSION.
+ *
+ * The old policy — bump the version and tell the user to delete the database —
+ * expired when the first production Item was linked. The database is now the
+ * only copy of the access tokens, every command routes through openDb, and on
+ * the Trial plan a removed Item does not return its slot. "Delete it and
+ * re-link" is no longer a recoverable instruction.
+ *
+ * Additive only: ADD COLUMN and CREATE TABLE. A migration that rewrites data
+ * needs its own reviewed path, not this loop.
+ */
+const MIGRATIONS: Record<number, readonly string[]> = {
+  6: [
+    'ALTER TABLE accounts ADD COLUMN limit_cents INTEGER',
+    'ALTER TABLE items ADD COLUMN liabilities_refreshed_at INTEGER',
+    `CREATE TABLE ${TBL_LIABILITY_MORTGAGE}`,
+    `CREATE TABLE ${TBL_LIABILITY_CREDIT}`,
+    `CREATE TABLE ${TBL_LIABILITY_CREDIT_APR}`,
+    ...LIABILITY_INDEXES.map(idx => `CREATE INDEX ${idx}`),
+  ],
+};
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -159,7 +249,8 @@ CREATE TABLE IF NOT EXISTS items (
   institution_id  TEXT,
   cursor          TEXT,
   created_at      INTEGER NOT NULL,
-  consented_products TEXT
+  consented_products TEXT,
+  liabilities_refreshed_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS accounts (
   id                      TEXT PRIMARY KEY,
@@ -173,7 +264,8 @@ CREATE TABLE IF NOT EXISTS accounts (
   iso_currency_code       TEXT,
   available_balance_cents INTEGER,
   current_balance_cents   INTEGER,
-  last_synced_at          INTEGER
+  last_synced_at          INTEGER,
+  limit_cents             INTEGER
 );
 CREATE TABLE IF NOT EXISTS transactions (
   id                             TEXT PRIMARY KEY,
@@ -248,6 +340,10 @@ CREATE TABLE IF NOT EXISTS recurring_streams (
 );
 CREATE INDEX IF NOT EXISTS idx_stream_item ON recurring_streams(item_id);
 CREATE INDEX IF NOT EXISTS idx_stream_next ON recurring_streams(predicted_next_date);
+CREATE TABLE IF NOT EXISTS ${TBL_LIABILITY_MORTGAGE};
+CREATE TABLE IF NOT EXISTS ${TBL_LIABILITY_CREDIT};
+CREATE TABLE IF NOT EXISTS ${TBL_LIABILITY_CREDIT_APR};
+${LIABILITY_INDEXES.map(idx => `CREATE INDEX IF NOT EXISTS ${idx};`).join('\n')}
 `;
 
 /** True when the core tables already exist, i.e. something wrote this file before. */
@@ -262,18 +358,12 @@ function hasCoreTables(db: Db): boolean {
 }
 
 /**
- * Creates the schema on a fresh database, or verifies an existing one matches
- * this build. There are no migrations: the tool has never shipped, so any
- * mismatch means a database from a pre-release build, and the honest fix is to
- * delete it and re-sync from Plaid rather than carry migration code forever.
+ * Creates the schema on a fresh database, or migrates an older one forward.
  *
- * THIS POLICY HAS AN EXPIRY. It holds only while no bank is linked. The database
- * stores the access tokens, and those are the one thing here that cannot be
- * re-downloaded — so once a real Item exists, "just delete it" means re-linking
- * every bank and consuming Item slots against the Trial plan's cap of 10.
- *
- * Make schema changes BEFORE linking. Once Items exist, replace this with
- * additive migrations rather than asking a user to throw their enrollments away.
+ * Version 0 with tables already present is a pre-versioning build (REAL dollar
+ * columns) and cannot be migrated. A version newer than this build is refused.
+ * Everything in between is applied by MIGRATIONS, or refused if a step is
+ * missing — we do not jump a gap.
  */
 function applySchema(db: Db, dbPath: string): void {
   const version = db.pragma('user_version', { simple: true }) as number;
@@ -287,10 +377,11 @@ function applySchema(db: Db, dbPath: string): void {
     if (hasCoreTables(db)) {
       throw new Error(
         `${dbPath} was created by an older build with an incompatible schema, and there ` +
-          `are no migrations. Delete the file (and its -wal/-shm siblings), then run ` +
-          `\`ledger auth\`. Transactions are all re-downloadable from Plaid; the access ` +
-          `tokens are not, so every bank has to be linked again — which consumes Item ` +
-          `slots against the Trial plan's cap of 10.`,
+          `are no migrations from that version. Delete the file (and its -wal/-shm siblings), ` +
+          `then run \`ledger auth\`. Transactions are all re-downloadable from Plaid; the ` +
+          `access tokens are not, so every bank has to be re-linked. On the Trial plan a ` +
+          `removed Item does not return its slot — re-linking consumes a new slot against ` +
+          `the cap of 10.`,
       );
     }
     db.exec(SCHEMA);
@@ -305,11 +396,37 @@ function applySchema(db: Db, dbPath: string): void {
     );
   }
 
-  throw new Error(
+  applyMigrations(db, version, dbPath);
+}
+
+function olderSchemaError(dbPath: string, version: number, missing: number): Error {
+  return new Error(
     `${dbPath} has schema version ${version}, but this build expects ${SCHEMA_VERSION}. ` +
-      `It was written by an older build and there are no migrations. Delete the file ` +
-      `(and its -wal/-shm siblings), then run \`ledger auth\` to re-link and re-sync.`,
+      `No migration is defined for version ${missing}. Delete the file ` +
+      `(and its -wal/-shm siblings), then run \`ledger auth\` to re-link and re-sync. ` +
+      `Every bank has to be re-linked, and on the Trial plan a removed Item does not ` +
+      `return its slot.`,
   );
+}
+
+/**
+ * Applies every migration from `fromVersion + 1` through SCHEMA_VERSION in one
+ * transaction, stamping user_version only at the end. A statement that fails
+ * rolls the whole step back, including the version bump.
+ */
+function applyMigrations(db: Db, fromVersion: number, dbPath: string): void {
+  const statements: string[] = [];
+  for (let next = fromVersion + 1; next <= SCHEMA_VERSION; next++) {
+    const step = MIGRATIONS[next];
+    if (step === undefined) throw olderSchemaError(dbPath, fromVersion, next);
+    statements.push(...step);
+  }
+
+  const run = db.transaction(() => {
+    for (const sql of statements) db.exec(sql);
+    db.pragma(`user_version = ${SCHEMA_VERSION}`);
+  });
+  run();
 }
 
 export function readMeta(db: Db, key: string): string | undefined {
@@ -372,9 +489,10 @@ export function openDb(dbPath: string, environment: PlaidEnvironment): Db {
 // ---------------------------------------------------------------- items
 
 /**
- * Upserting an Item deliberately leaves `cursor` and `consented_products`
- * alone. Re-linking the same Item through update mode must not discard sync
- * progress or erase consent just established.
+ * Upserting an Item deliberately leaves `cursor`, `consented_products`, and
+ * `liabilities_refreshed_at` alone. Re-linking the same Item through update
+ * mode must not discard sync progress, erase consent, or make a fresh
+ * liabilities snapshot look never-fetched.
  */
 export function upsertItem(db: Db, row: ItemUpsert): void {
   db.prepare(
@@ -452,8 +570,13 @@ export function removeItem(db: Db, itemId: string): RemovedItemCounts {
         .prepare(`DELETE FROM transactions WHERE account_id IN (${placeholders})`)
         .run(...batch).changes;
     }
-    // Streams reference both items and accounts; clear them before accounts.
+    // Streams and liabilities reference both items and accounts; clear them
+    // before accounts. Skipping this aborts on the foreign key *after*
+    // `/item/remove` has already destroyed the Item at Plaid.
     db.prepare('DELETE FROM recurring_streams WHERE item_id = ?').run(itemId);
+    db.prepare('DELETE FROM liability_credit_apr WHERE item_id = ?').run(itemId);
+    db.prepare('DELETE FROM liability_credit WHERE item_id = ?').run(itemId);
+    db.prepare('DELETE FROM liability_mortgage WHERE item_id = ?').run(itemId);
     const accounts = db.prepare('DELETE FROM accounts WHERE item_id = ?').run(itemId).changes;
     db.prepare('DELETE FROM items WHERE id = ?').run(itemId);
     return { accounts, transactions };
@@ -475,10 +598,12 @@ export function upsertAccount(db: Db, row: AccountUpsert): void {
   db.prepare(
     `INSERT INTO accounts (
        id, item_id, name, official_name, institution, type, subtype, mask,
-       iso_currency_code, available_balance_cents, current_balance_cents, last_synced_at
+       iso_currency_code, available_balance_cents, current_balance_cents, limit_cents,
+       last_synced_at
      ) VALUES (
        @id, @item_id, @name, @official_name, @institution, @type, @subtype, @mask,
-       @iso_currency_code, @available_balance_cents, @current_balance_cents, NULL
+       @iso_currency_code, @available_balance_cents, @current_balance_cents, @limit_cents,
+       NULL
      )
      ON CONFLICT(id) DO UPDATE SET
        item_id                 = excluded.item_id,
@@ -490,7 +615,8 @@ export function upsertAccount(db: Db, row: AccountUpsert): void {
        mask                    = excluded.mask,
        iso_currency_code       = excluded.iso_currency_code,
        available_balance_cents = excluded.available_balance_cents,
-       current_balance_cents   = excluded.current_balance_cents`,
+       current_balance_cents   = excluded.current_balance_cents,
+       limit_cents             = excluded.limit_cents`,
   ).run(row);
 }
 
@@ -753,5 +879,185 @@ export function lastRecurringRefreshAt(db: Db): number | null {
   const row = db.prepare('SELECT MIN(refreshed_at) AS oldest FROM recurring_streams').get() as {
     oldest: number | null;
   };
+  return row.oldest;
+}
+
+// ---------------------------------------------------------- liabilities
+
+export interface MortgageLiabilityRow {
+  account_id: string;
+  item_id: string;
+  refreshed_at: number;
+  /** Percentage points, not money. 6.125 means 6.125%. Never pass through toCents. */
+  interest_rate_percentage: number | null;
+  interest_rate_type: string | null;
+  escrow_balance_cents: number | null;
+  current_late_fee_cents: number | null;
+  /** SQLite has no boolean: 0, 1, or null when the servicer did not report it. */
+  has_pmi: number | null;
+  has_prepayment_penalty: number | null;
+  last_payment_amount_cents: number | null;
+  last_payment_date: string | null;
+  loan_type_description: string | null;
+  loan_term: string | null;
+  maturity_date: string | null;
+  next_monthly_payment_cents: number | null;
+  next_payment_due_date: string | null;
+  origination_date: string | null;
+  origination_principal_amount_cents: number | null;
+  past_due_amount_cents: number | null;
+  property_street: string | null;
+  property_city: string | null;
+  property_region: string | null;
+  property_postal_code: string | null;
+  property_country: string | null;
+  ytd_interest_paid_cents: number | null;
+  ytd_principal_paid_cents: number | null;
+}
+
+export interface CreditLiabilityRow {
+  account_id: string;
+  item_id: string;
+  refreshed_at: number;
+  /** SQLite has no boolean: 0, 1, or null when the issuer did not report it. */
+  is_overdue: number | null;
+  last_payment_amount_cents: number | null;
+  last_payment_date: string | null;
+  last_statement_issue_date: string | null;
+  last_statement_balance_cents: number | null;
+  minimum_payment_amount_cents: number | null;
+  next_payment_due_date: string | null;
+  /** Percentage points, denormalised from aprs where apr_type is purchase_apr. */
+  purchase_apr_percentage: number | null;
+}
+
+export interface CreditAprRow {
+  account_id: string;
+  item_id: string;
+  refreshed_at: number;
+  apr_type: string;
+  /** Percentage points, not money. 6.125 means 6.125%. */
+  apr_percentage: number;
+  balance_subject_to_apr_cents: number | null;
+  interest_charge_amount_cents: number | null;
+}
+
+export interface LiabilitySnapshot {
+  mortgage: readonly MortgageLiabilityRow[];
+  credit: readonly CreditLiabilityRow[];
+  aprs: readonly CreditAprRow[];
+}
+
+/**
+ * Replaces every liability for the Item across all three tables and stamps
+ * `items.liabilities_refreshed_at`, in one transaction.
+ *
+ * Replace, never merge: the endpoint has no cursor and no removed list, so a
+ * card absent from a response has been closed. The empty snapshot is NOT a
+ * special case — a bank that closed its last card answers NO_LIABILITY_ACCOUNTS,
+ * and returning early would keep the dead card forever.
+ *
+ * Returns how many parent liability rows (mortgage + credit) were deleted.
+ * APR rows are children of credit and are not counted separately.
+ */
+export function replaceLiabilities(
+  db: Db,
+  itemId: string,
+  snap: LiabilitySnapshot,
+  refreshedAt: number,
+): number {
+  const run = db.transaction((): number => {
+    db.prepare('DELETE FROM liability_credit_apr WHERE item_id = ?').run(itemId);
+    const deletedCredit = db
+      .prepare('DELETE FROM liability_credit WHERE item_id = ?')
+      .run(itemId).changes;
+    const deletedMortgage = db
+      .prepare('DELETE FROM liability_mortgage WHERE item_id = ?')
+      .run(itemId).changes;
+
+    const insMortgage = db.prepare(
+      `INSERT INTO liability_mortgage (
+         account_id, item_id, refreshed_at, interest_rate_percentage, interest_rate_type,
+         escrow_balance_cents, current_late_fee_cents, has_pmi, has_prepayment_penalty,
+         last_payment_amount_cents, last_payment_date, loan_type_description, loan_term,
+         maturity_date, next_monthly_payment_cents, next_payment_due_date, origination_date,
+         origination_principal_amount_cents, past_due_amount_cents, property_street,
+         property_city, property_region, property_postal_code, property_country,
+         ytd_interest_paid_cents, ytd_principal_paid_cents
+       ) VALUES (
+         @account_id, @item_id, @refreshed_at, @interest_rate_percentage, @interest_rate_type,
+         @escrow_balance_cents, @current_late_fee_cents, @has_pmi, @has_prepayment_penalty,
+         @last_payment_amount_cents, @last_payment_date, @loan_type_description, @loan_term,
+         @maturity_date, @next_monthly_payment_cents, @next_payment_due_date, @origination_date,
+         @origination_principal_amount_cents, @past_due_amount_cents, @property_street,
+         @property_city, @property_region, @property_postal_code, @property_country,
+         @ytd_interest_paid_cents, @ytd_principal_paid_cents
+       )`,
+    );
+    for (const row of snap.mortgage) insMortgage.run(row);
+
+    const insCredit = db.prepare(
+      `INSERT INTO liability_credit (
+         account_id, item_id, refreshed_at, is_overdue, last_payment_amount_cents,
+         last_payment_date, last_statement_issue_date, last_statement_balance_cents,
+         minimum_payment_amount_cents, next_payment_due_date, purchase_apr_percentage
+       ) VALUES (
+         @account_id, @item_id, @refreshed_at, @is_overdue, @last_payment_amount_cents,
+         @last_payment_date, @last_statement_issue_date, @last_statement_balance_cents,
+         @minimum_payment_amount_cents, @next_payment_due_date, @purchase_apr_percentage
+       )`,
+    );
+    for (const row of snap.credit) insCredit.run(row);
+
+    const insApr = db.prepare(
+      `INSERT INTO liability_credit_apr (
+         account_id, item_id, refreshed_at, apr_type, apr_percentage,
+         balance_subject_to_apr_cents, interest_charge_amount_cents
+       ) VALUES (
+         @account_id, @item_id, @refreshed_at, @apr_type, @apr_percentage,
+         @balance_subject_to_apr_cents, @interest_charge_amount_cents
+       )`,
+    );
+    for (const row of snap.aprs) insApr.run(row);
+
+    db.prepare('UPDATE items SET liabilities_refreshed_at = ? WHERE id = ?').run(
+      refreshedAt,
+      itemId,
+    );
+    return deletedMortgage + deletedCredit;
+  });
+  return run();
+}
+
+export function listMortgageRows(db: Db): MortgageLiabilityRow[] {
+  return db
+    .prepare('SELECT * FROM liability_mortgage ORDER BY account_id')
+    .all() as MortgageLiabilityRow[];
+}
+
+export function listCreditRows(db: Db): CreditLiabilityRow[] {
+  return db
+    .prepare('SELECT * FROM liability_credit ORDER BY account_id')
+    .all() as CreditLiabilityRow[];
+}
+
+export function listCreditAprRows(db: Db): CreditAprRow[] {
+  return db
+    .prepare(
+      `SELECT * FROM liability_credit_apr
+       ORDER BY account_id, apr_type, apr_percentage`,
+    )
+    .all() as CreditAprRow[];
+}
+
+/**
+ * Oldest Item-level liabilities stamp, or null when no Item has been refreshed.
+ * SQLite MIN ignores NULLs, so never-fetched Items do not make a fetched empty
+ * snapshot look permanently stale.
+ */
+export function lastLiabilitiesRefreshAt(db: Db): number | null {
+  const row = db
+    .prepare('SELECT MIN(liabilities_refreshed_at) AS oldest FROM items')
+    .get() as { oldest: number | null };
   return row.oldest;
 }

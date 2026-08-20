@@ -11,11 +11,13 @@ import {
 } from '../core/queries.js';
 import { isReauthRequired, type LedgerPlaidApi } from '../core/plaid-client.js';
 import { listRecurring, refreshRecurring } from '../core/recurring.js';
+import { listLiabilities, refreshLiabilities } from '../core/liabilities.js';
 import { syncAll } from '../core/sync.js';
 // Money is stored as integer cents. Every tool result goes through a view so the
 // model always sees decimal dollars — the same views the CLI's --json output uses.
 import {
   accountsResultView,
+  liabilitiesResultView,
   recurringResultView,
   spendingResultView,
   transactionsResultView,
@@ -60,7 +62,11 @@ export function buildMcpServer(deps: Deps): McpServer {
       description:
         'List all linked bank accounts with balances from the local cache. ' +
         'Result meta.stale=true means data is >24h old — consider calling sync first. ' +
-        'available_balance and current_balance may be null when the institution does not report them.',
+        'available_balance and current_balance may be null when the institution does not report them. ' +
+        'SIGN: for depository accounts a positive current_balance is money you have. For loan and ' +
+        'credit accounts a positive current_balance is money OWED — subtract it from net worth, ' +
+        'never add it. Without this, a $300k mortgage looks like an asset. limit is the credit ' +
+        'limit when the institution reports one, otherwise null.',
       inputSchema: {},
     },
     async () => {
@@ -246,6 +252,89 @@ export function buildMcpServer(deps: Deps): McpServer {
     async args => {
       try {
         const results = await refreshRecurring(deps.db, deps.api, { itemId: args.itemId });
+        if (results.some(r => r.needsReauth)) {
+          return {
+            content: [{ type: 'text', text: JSON.stringify({ error: REAUTH_GUIDANCE, results }) }],
+            isError: true,
+          };
+        }
+        return ok({ results });
+      } catch (error) {
+        return err(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'list_liabilities',
+    {
+      description:
+        'List mortgages and credit cards from the local liabilities cache — the right tool ' +
+        'for rate, term, escrow, next payment, remaining principal, APR, and due date. These ' +
+        'are Plaid Liabilities, not something derivable from list_transactions. ' +
+        'Mortgage outstanding_principal is JOINED from the account balance in the same ' +
+        '/liabilities/get payload; it is not in Plaid\'s mortgage object. If it is null, say ' +
+        'so — never derive one from origination_principal_amount. ' +
+        'Every *_percentage field is a percentage, not money: 6.125 means 6.125%. ' +
+        'Never report origination_principal_amount minus outstanding_principal as "amount ' +
+        'paid" — that is principal reduction only and excludes interest, which on a mortgage ' +
+        'is most of what was paid. ' +
+        'escrow_balance is a balance held on the borrower\'s behalf, never a payment amount; ' +
+        'never add it to next_monthly_payment and never subtract it from principal. ' +
+        'next_monthly_payment is the servicer\'s stated next payment and is not guaranteed to ' +
+        'include escrow, taxes, or insurance — not "total housing cost." ' +
+        'ytd_interest_paid and ytd_principal_paid are calendar-year-to-date as of refreshed_at, ' +
+        'reset each January, not lifetime totals. Lifetime interest paid is not available from ' +
+        'Plaid at all. ' +
+        'loan_term and loan_type_description are unenumerated free text from the servicer ' +
+        '("30 year", "360 months") — display only, never parsed. maturity_date is the ' +
+        'machine-readable payoff date. ' +
+        'kind filters to mortgage or credit. accountId filters to one account. ' +
+        'meta.stale=true means the Item-level snapshot is >24h old — call refresh_liabilities, ' +
+        'then call this again. Plaid re-reads liabilities about once a day and it cannot be ' +
+        'forced, so a stale figure stays stale until tomorrow — say so rather than retrying. ' +
+        'If nothing is returned at all, they have never been fetched; refresh_liabilities is ' +
+        'also the fix for that. HELOC and auto loans are not covered by Plaid Liabilities.',
+      inputSchema: {
+        kind: z.enum(['mortgage', 'credit']).optional(),
+        accountId: z.string().optional(),
+      },
+    },
+    async args => {
+      try {
+        return ok(liabilitiesResultView(listLiabilities(deps.db, args)));
+      } catch (error) {
+        return err(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'refresh_liabilities',
+    {
+      description:
+        'Refetch mortgage and credit-card liabilities from the banks via the Plaid API. Call ' +
+        'when list_liabilities reports meta.stale=true or returns nothing at all. Takes ' +
+        '~5-30 seconds per bank. ' +
+        'Each refresh REPLACES every liability for a bank — Plaid returns a full snapshot ' +
+        'with no cursor, so a card that disappears has been closed rather than lost. ' +
+        'There is no /liabilities/refresh; Plaid re-reads on its own daily schedule and it ' +
+        'cannot be forced, so a stale figure stays stale until tomorrow. ' +
+        'NO_LIABILITY_ACCOUNTS returns ok: true and is normal for checking-only banks — not ' +
+        'an error, do not retry, do not mention unless asked about that bank. It still ' +
+        'writes an empty snapshot so a closed card does not linger. ' +
+        'If a result carries needsConsent, run `ledger auth consent <item_id>` — unlike ' +
+        'recurring transactions, Liabilities IS grantable per Item through Link update mode. ' +
+        'If a result carries unsupported, the institution cannot serve the product; consent ' +
+        'will not help and there is nothing to retry. ' +
+        'A per-bank failure does not discard that bank\'s existing liabilities.',
+      inputSchema: {
+        itemId: z.string().optional().describe('refresh only this institution'),
+      },
+    },
+    async args => {
+      try {
+        const results = await refreshLiabilities(deps.db, deps.api, { itemId: args.itemId });
         if (results.some(r => r.needsReauth)) {
           return {
             content: [{ type: 'text', text: JSON.stringify({ error: REAUTH_GUIDANCE, results }) }],

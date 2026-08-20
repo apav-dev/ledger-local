@@ -13,16 +13,25 @@
  * The view types are derived with `Omit` so adding a column to a row type breaks
  * compilation here rather than silently dropping the field from output.
  */
-import type { AccountRow, RecurringStreamRow, TransactionRow } from './db.js';
+import type {
+  AccountRow,
+  CreditAprRow,
+  CreditLiabilityRow,
+  MortgageLiabilityRow,
+  RecurringStreamRow,
+  TransactionRow,
+} from './db.js';
+import type { LiabilitiesQueryResult } from './liabilities.js';
 import { centsToDollars, centsToDollarsOrNull } from './money.js';
 import type { QueryMeta, SpendingGroup } from './queries.js';
 
 export type AccountView = Omit<
   AccountRow,
-  'available_balance_cents' | 'current_balance_cents'
+  'available_balance_cents' | 'current_balance_cents' | 'limit_cents'
 > & {
   available_balance: number | null;
   current_balance: number | null;
+  limit: number | null;
 };
 
 export type TransactionView = Omit<TransactionRow, 'amount_cents'> & { amount: number };
@@ -42,6 +51,7 @@ export function accountView(row: AccountRow): AccountView {
     iso_currency_code: row.iso_currency_code,
     available_balance: centsToDollarsOrNull(row.available_balance_cents),
     current_balance: centsToDollarsOrNull(row.current_balance_cents),
+    limit: centsToDollarsOrNull(row.limit_cents),
     last_synced_at: row.last_synced_at,
   };
 }
@@ -196,4 +206,148 @@ export function recurringResultView(result: {
   meta: QueryMeta;
 }): { streams: RecurringStreamView[]; meta: QueryMeta } {
   return { streams: result.streams.map(recurringStreamView), meta: result.meta };
+}
+
+/** SQLite 0/1/NULL → real boolean. Bare `=== 1` would report unreported PMI as no PMI. */
+function toBool(value: number | null): boolean | null {
+  return value === null ? null : value === 1;
+}
+
+export type MortgageView = Omit<
+  MortgageLiabilityRow,
+  | 'escrow_balance_cents'
+  | 'current_late_fee_cents'
+  | 'last_payment_amount_cents'
+  | 'next_monthly_payment_cents'
+  | 'origination_principal_amount_cents'
+  | 'past_due_amount_cents'
+  | 'ytd_interest_paid_cents'
+  | 'ytd_principal_paid_cents'
+  | 'has_pmi'
+  | 'has_prepayment_penalty'
+> & {
+  escrow_balance: number | null;
+  current_late_fee: number | null;
+  last_payment_amount: number | null;
+  next_monthly_payment: number | null;
+  origination_principal_amount: number | null;
+  past_due_amount: number | null;
+  ytd_interest_paid: number | null;
+  ytd_principal_paid: number | null;
+  has_pmi: boolean | null;
+  has_prepayment_penalty: boolean | null;
+  institution: string | null;
+  account_name: string | null;
+  account_mask: string | null;
+  outstanding_principal: number | null;
+};
+
+export function mortgageView(
+  row: MortgageLiabilityRow,
+  account: AccountRow | undefined,
+): MortgageView {
+  return {
+    account_id: row.account_id,
+    item_id: row.item_id,
+    refreshed_at: row.refreshed_at,
+    // Percentages are percentages. 6.125 means 6.125%.
+    interest_rate_percentage: row.interest_rate_percentage,
+    interest_rate_type: row.interest_rate_type,
+    escrow_balance: centsToDollarsOrNull(row.escrow_balance_cents),
+    current_late_fee: centsToDollarsOrNull(row.current_late_fee_cents),
+    has_pmi: toBool(row.has_pmi),
+    has_prepayment_penalty: toBool(row.has_prepayment_penalty),
+    last_payment_amount: centsToDollarsOrNull(row.last_payment_amount_cents),
+    last_payment_date: row.last_payment_date,
+    loan_type_description: row.loan_type_description,
+    loan_term: row.loan_term,
+    maturity_date: row.maturity_date,
+    next_monthly_payment: centsToDollarsOrNull(row.next_monthly_payment_cents),
+    next_payment_due_date: row.next_payment_due_date,
+    origination_date: row.origination_date,
+    origination_principal_amount: centsToDollarsOrNull(row.origination_principal_amount_cents),
+    past_due_amount: centsToDollarsOrNull(row.past_due_amount_cents),
+    property_street: row.property_street,
+    property_city: row.property_city,
+    property_region: row.property_region,
+    property_postal_code: row.property_postal_code,
+    property_country: row.property_country,
+    ytd_interest_paid: centsToDollarsOrNull(row.ytd_interest_paid_cents),
+    ytd_principal_paid: centsToDollarsOrNull(row.ytd_principal_paid_cents),
+    institution: account?.institution ?? null,
+    account_name: account?.name ?? null,
+    account_mask: account?.mask ?? null,
+    // Joined from accounts. Never derived from origination_principal_amount.
+    outstanding_principal: centsToDollarsOrNull(account?.current_balance_cents ?? null),
+  };
+}
+
+export type CreditView = Omit<
+  CreditLiabilityRow,
+  | 'last_payment_amount_cents'
+  | 'last_statement_balance_cents'
+  | 'minimum_payment_amount_cents'
+  | 'is_overdue'
+> & {
+  last_payment_amount: number | null;
+  last_statement_balance: number | null;
+  minimum_payment_amount: number | null;
+  is_overdue: boolean | null;
+  institution: string | null;
+  account_name: string | null;
+  account_mask: string | null;
+};
+
+export function creditView(row: CreditLiabilityRow, account: AccountRow | undefined): CreditView {
+  return {
+    account_id: row.account_id,
+    item_id: row.item_id,
+    refreshed_at: row.refreshed_at,
+    is_overdue: toBool(row.is_overdue),
+    last_payment_amount: centsToDollarsOrNull(row.last_payment_amount_cents),
+    last_payment_date: row.last_payment_date,
+    last_statement_issue_date: row.last_statement_issue_date,
+    last_statement_balance: centsToDollarsOrNull(row.last_statement_balance_cents),
+    minimum_payment_amount: centsToDollarsOrNull(row.minimum_payment_amount_cents),
+    next_payment_due_date: row.next_payment_due_date,
+    purchase_apr_percentage: row.purchase_apr_percentage,
+    institution: account?.institution ?? null,
+    account_name: account?.name ?? null,
+    account_mask: account?.mask ?? null,
+  };
+}
+
+export type AprView = Omit<
+  CreditAprRow,
+  'balance_subject_to_apr_cents' | 'interest_charge_amount_cents'
+> & {
+  balance_subject_to_apr: number | null;
+  interest_charge_amount: number | null;
+};
+
+export function aprView(row: CreditAprRow): AprView {
+  return {
+    account_id: row.account_id,
+    item_id: row.item_id,
+    refreshed_at: row.refreshed_at,
+    apr_type: row.apr_type,
+    apr_percentage: row.apr_percentage,
+    balance_subject_to_apr: centsToDollarsOrNull(row.balance_subject_to_apr_cents),
+    interest_charge_amount: centsToDollarsOrNull(row.interest_charge_amount_cents),
+  };
+}
+
+export function liabilitiesResultView(result: LiabilitiesQueryResult): {
+  mortgages: MortgageView[];
+  credit: CreditView[];
+  aprs: AprView[];
+  meta: QueryMeta;
+} {
+  const byId = new Map(result.accounts.map(a => [a.id, a]));
+  return {
+    mortgages: result.mortgages.map(r => mortgageView(r, byId.get(r.account_id))),
+    credit: result.credit.map(r => creditView(r, byId.get(r.account_id))),
+    aprs: result.aprs.map(aprView),
+    meta: result.meta,
+  };
 }

@@ -21,7 +21,14 @@ import { createTtyPrompter, type Prompter } from './prompt.js';
 // same ones the MCP server uses, so the two frontends cannot disagree.
 import { listRecurring, refreshRecurring, type RecurringRefreshResult } from '../core/recurring.js';
 import {
+  LIABILITY_CAVEATS,
+  listLiabilities,
+  refreshLiabilities,
+  type LiabilitiesRefreshResult,
+} from '../core/liabilities.js';
+import {
   accountsResultView,
+  liabilitiesResultView,
   recurringResultView,
   spendingResultView,
   transactionsResultView,
@@ -134,6 +141,42 @@ function printRecurringRefresh(results: RecurringRefreshResult[], json: boolean)
     );
   }
   if (results.some(r => r.needsConsent)) process.stderr.write(RECURRING_PRODUCT_HINT + '\n');
+  if (results.some(r => r.needsReauth)) {
+    process.stderr.write(REAUTH_HINT + '\n');
+    process.exitCode = EXIT_REAUTH;
+  } else if (results.some(r => !r.ok)) {
+    process.exitCode = EXIT_GENERAL;
+  }
+}
+
+const LIABILITIES_CONSENT_HINT =
+  'Plaid says one or more banks have not consented to Liabilities.\n' +
+  'Unlike recurring transactions, this one IS grantable per Item: run\n' +
+  '`ledger auth consent <item_id>` — Link update mode keeps the connection,\n' +
+  'the cursor, and the Item slot.';
+
+const LIABILITIES_UNSUPPORTED_HINT =
+  'One or more institutions do not support Liabilities. Consent will not help\n' +
+  'and there is nothing to retry — Plaid coverage varies by bank.';
+
+function printLiabilitiesRefresh(results: LiabilitiesRefreshResult[], json: boolean): void {
+  if (json) {
+    process.stdout.write(JSON.stringify(results, null, 2) + '\n');
+  } else {
+    process.stdout.write(
+      formatTable(
+        results.map(r => ({
+          institution: r.institution,
+          ok: r.ok ? 'yes' : 'NO',
+          mortgages: r.mortgages,
+          credit: r.credit,
+          note: r.noLiabilityAccounts === true ? 'no liability accounts' : (r.error ?? ''),
+        })),
+      ) + '\n',
+    );
+  }
+  if (results.some(r => r.needsConsent)) process.stderr.write(LIABILITIES_CONSENT_HINT + '\n');
+  if (results.some(r => r.unsupported)) process.stderr.write(LIABILITIES_UNSUPPORTED_HINT + '\n');
   if (results.some(r => r.needsReauth)) {
     process.stderr.write(REAUTH_HINT + '\n');
     process.exitCode = EXIT_REAUTH;
@@ -269,7 +312,7 @@ item
           `${removed.accounts} accounts, ${removed.transactions} transactions.\n` +
           (removed.alreadyGoneAtPlaid
             ? 'Plaid had already dropped this Item; only local rows were cleaned up.\n'
-            : 'The Item slot is free again.\n'),
+            : 'The access token is invalid. On the Trial plan this does not return the Item slot.\n'),
       );
     }),
   );
@@ -628,6 +671,103 @@ recurring
     withCtx(program, async ({ cfg, db, json }, opts: { item?: string }) => {
       const results = await refreshRecurring(db, clientFromConfig(cfg), { itemId: opts.item });
       printRecurringRefresh(results, json);
+    }),
+  );
+
+function rateLabel(percentage: number | null): string {
+  return percentage === null ? '—' : `${percentage.toFixed(3)}%`;
+}
+
+const liabilities = program
+  .command('liabilities')
+  .description('mortgages and credit cards (from local db)')
+  .option('--kind <mortgage|credit>', 'only mortgages, or only credit cards')
+  .option('--account <id>', 'only this account')
+  .addHelpText(
+    'after',
+    '\nReading these numbers correctly:\n' +
+      LIABILITY_CAVEATS.map(c => `  - ${c}`).join('\n') +
+      '\n',
+  )
+  .action(
+    withCtx(program, ({ db, json }, opts: { kind?: string; account?: string }) => {
+      if (opts.kind !== undefined && opts.kind !== 'mortgage' && opts.kind !== 'credit') {
+        fail(`--kind must be "mortgage" or "credit", got "${opts.kind}"`, EXIT_GENERAL, json);
+      }
+      const raw = listLiabilities(db, {
+        kind: opts.kind as 'mortgage' | 'credit' | undefined,
+        accountId: opts.account,
+      });
+
+      if (json) {
+        // `notes` rides along on every response because the only consumer of
+        // this output is a script or an agent, and neither reads a man page at
+        // call time. The MCP server puts the same warnings in its tool
+        // description; a CLI caller has no equivalent channel.
+        process.stdout.write(
+          JSON.stringify({ ...liabilitiesResultView(raw), notes: LIABILITY_CAVEATS }, null, 2) +
+            '\n',
+        );
+        return;
+      }
+      if (raw.mortgages.length === 0 && raw.credit.length === 0) {
+        process.stdout.write(
+          'No liabilities stored. Run `ledger liabilities refresh` to fetch them.\n',
+        );
+        return;
+      }
+      const accounts = new Map(raw.accounts.map(a => [a.id, a]));
+      if (raw.mortgages.length > 0) {
+        process.stdout.write(
+          formatTable(
+            raw.mortgages.map(m => {
+              const a = accounts.get(m.account_id);
+              return {
+                institution: a?.institution ?? '',
+                account: a?.name ?? m.account_id,
+                // Rate is a percentage, never money().
+                rate: rateLabel(m.interest_rate_percentage),
+                principal: money(a?.current_balance_cents ?? null),
+                next: money(m.next_monthly_payment_cents),
+                due: m.next_payment_due_date ?? '—',
+              };
+            }),
+          ) + '\n',
+        );
+      }
+      if (raw.credit.length > 0) {
+        process.stdout.write(
+          formatTable(
+            raw.credit.map(c => {
+              const a = accounts.get(c.account_id);
+              return {
+                institution: a?.institution ?? '',
+                account: a?.name ?? c.account_id,
+                apr: rateLabel(c.purchase_apr_percentage),
+                statement: money(c.last_statement_balance_cents),
+                minimum: money(c.minimum_payment_amount_cents),
+                due: c.next_payment_due_date ?? '—',
+              };
+            }),
+          ) + '\n',
+        );
+      }
+      if (raw.meta.stale) {
+        process.stderr.write(
+          'These liabilities are more than 24h old. Run `ledger liabilities refresh`.\n',
+        );
+      }
+    }),
+  );
+
+liabilities
+  .command('refresh')
+  .description('refetch mortgage and credit-card liabilities from Plaid')
+  .option('--item <id>', 'refresh only this institution')
+  .action(
+    withCtx(program, async ({ cfg, db, json }, opts: { item?: string }) => {
+      const results = await refreshLiabilities(db, clientFromConfig(cfg), { itemId: opts.item });
+      printLiabilitiesRefresh(results, json);
     }),
   );
 

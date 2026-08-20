@@ -1,9 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import type { AccountRow } from '../src/core/db.js';
+import type { AccountRow, CreditAprRow, CreditLiabilityRow, MortgageLiabilityRow } from '../src/core/db.js';
 import type { QueryMeta } from '../src/core/queries.js';
 import {
   accountsResultView,
+  aprView,
+  creditView,
   leanTransactionView,
+  liabilitiesResultView,
+  mortgageView,
   recurringStreamView,
   spendingResultView,
   transactionView,
@@ -66,7 +70,8 @@ describe('accountsResultView', () => {
   });
 
   it('keeps a negative balance negative', () => {
-    // A credit card carries a negative balance; the view must not take abs.
+    // Views convert scale, never sign. A negative input must not be abs'd,
+    // regardless of account type.
     const view = accountsResultView({
       accounts: [
         accountRow({
@@ -227,6 +232,113 @@ describe('recurringStreamView', () => {
   });
 });
 
+function mortgageRow(over: Partial<MortgageLiabilityRow> = {}): MortgageLiabilityRow {
+  return {
+    account_id: 'acc_loan',
+    item_id: 'item_1',
+    refreshed_at: 1000,
+    interest_rate_percentage: 6.125,
+    interest_rate_type: 'fixed',
+    escrow_balance_cents: 250_000,
+    current_late_fee_cents: null,
+    has_pmi: 0,
+    has_prepayment_penalty: null,
+    last_payment_amount_cents: 210_000,
+    last_payment_date: '2026-08-01',
+    loan_type_description: 'conventional',
+    loan_term: '30 year',
+    maturity_date: '2054-05-01',
+    next_monthly_payment_cents: 210_000,
+    next_payment_due_date: '2026-09-01',
+    origination_date: '2024-05-01',
+    origination_principal_amount_cents: 40_000_000,
+    past_due_amount_cents: null,
+    property_street: '1 Main St',
+    property_city: 'Austin',
+    property_region: 'TX',
+    property_postal_code: '78701',
+    property_country: 'US',
+    ytd_interest_paid_cents: 800_000,
+    ytd_principal_paid_cents: 400_000,
+    ...over,
+  };
+}
+
+describe('mortgageView', () => {
+  it('converts cents to dollars and passes 6.125 through as a percentage', () => {
+    const view = mortgageView(
+      mortgageRow(),
+      accountRow({ id: 'acc_loan', type: 'loan', current_balance_cents: 30_000_000 }),
+    );
+
+    expect(view.interest_rate_percentage).toBe(6.125);
+    expect(view.escrow_balance).toBe(2500);
+    expect(view.next_monthly_payment).toBe(2100);
+    expect(view.outstanding_principal).toBe(300_000);
+    expect(view.has_pmi).toBe(false);
+    expect(view.has_prepayment_penalty).toBeNull();
+    expect(view).not.toHaveProperty('escrow_balance_cents');
+    expect(view).not.toHaveProperty('outstanding_principal_cents');
+  });
+
+  it('does not derive outstanding principal from origination', () => {
+    const view = mortgageView(mortgageRow(), undefined);
+    expect(view.outstanding_principal).toBeNull();
+    expect(view.origination_principal_amount).toBe(400_000);
+  });
+
+  it('treats unreported PMI as null, not false', () => {
+    expect(mortgageView(mortgageRow({ has_pmi: null }), undefined).has_pmi).toBeNull();
+    expect(mortgageView(mortgageRow({ has_pmi: 1 }), undefined).has_pmi).toBe(true);
+    expect(mortgageView(mortgageRow({ has_pmi: 0 }), undefined).has_pmi).toBe(false);
+  });
+});
+
+describe('creditView and aprView', () => {
+  const credit: CreditLiabilityRow = {
+    account_id: 'acc_2',
+    item_id: 'item_1',
+    refreshed_at: 1000,
+    is_overdue: 0,
+    last_payment_amount_cents: 15_000,
+    last_payment_date: '2026-08-05',
+    last_statement_issue_date: '2026-08-01',
+    last_statement_balance_cents: 80_000,
+    minimum_payment_amount_cents: 3500,
+    next_payment_due_date: '2026-08-25',
+    purchase_apr_percentage: 18.24,
+  };
+
+  it('converts statement money and leaves purchase APR as a percentage', () => {
+    const view = creditView(credit, accountRow({ id: 'acc_2', type: 'credit', name: 'Card' }));
+    expect(view.last_statement_balance).toBe(800);
+    expect(view.purchase_apr_percentage).toBe(18.24);
+    expect(view.is_overdue).toBe(false);
+    expect(view.account_name).toBe('Card');
+    expect(view).not.toHaveProperty('last_statement_balance_cents');
+  });
+
+  it('treats unreported overdue as null, not false', () => {
+    expect(creditView({ ...credit, is_overdue: null }, undefined).is_overdue).toBeNull();
+  });
+
+  it('converts APR money and leaves apr_percentage untouched', () => {
+    const row: CreditAprRow = {
+      account_id: 'acc_2',
+      item_id: 'item_1',
+      refreshed_at: 1000,
+      apr_type: 'purchase_apr',
+      apr_percentage: 6.125,
+      balance_subject_to_apr_cents: 80_000,
+      interest_charge_amount_cents: 1200,
+    };
+    const view = aprView(row);
+    expect(view.apr_percentage).toBe(6.125);
+    expect(view.balance_subject_to_apr).toBe(800);
+    expect(view).not.toHaveProperty('balance_subject_to_apr_cents');
+  });
+});
+
 describe('no cent-denominated field escapes a view', () => {
   // The whole point of boundary B: a caller must never see a cents field and
   // misread 4599 as $4,599. This fails if a new column is added without being
@@ -249,6 +361,16 @@ describe('no cent-denominated field escapes a view', () => {
       spendingResultView({
         groups: [{ key: 'GROCERIES', totalCents: 8000, count: 2, share: 1 }],
         grandTotalCents: 8000,
+        meta: META,
+      }),
+    ],
+    [
+      'liabilities',
+      liabilitiesResultView({
+        mortgages: [mortgageRow()],
+        credit: [],
+        aprs: [],
+        accounts: [accountRow({ id: 'acc_loan', type: 'loan', current_balance_cents: 30_000_000 })],
         meta: META,
       }),
     ],

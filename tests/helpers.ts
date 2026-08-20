@@ -68,7 +68,7 @@ export function seedDb(): Db {
   upsertAccount(db, {
     id: 'acc_2', item_id: 'item_1', name: 'Card', official_name: 'Freedom Card',
     institution: 'Chase', type: 'credit', subtype: 'credit card', mask: '2222',
-    iso_currency_code: 'USD', available_balance_cents: -20_000, current_balance_cents: -20_000,
+    iso_currency_code: 'USD', available_balance_cents: 20_000, current_balance_cents: 20_000,
     limit_cents: null,
   });
   setAccountSynced(db, 'acc_1', NOW - 60_000); // 1 min ago

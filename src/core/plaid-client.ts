@@ -219,7 +219,7 @@ export interface LedgerPlaidApi {
   createLinkToken(opts: CreateLinkTokenOpts): Promise<LinkTokenResult>;
   getLinkSession(linkToken: string): Promise<LinkTokenGetResponse>;
   exchangePublicToken(publicToken: string): Promise<{ accessToken: string; itemId: string }>;
-  /** Deletes the Item at Plaid, freeing its slot and invalidating its access token. */
+  /** Deletes the Item at Plaid and invalidates its access token. On the Trial plan this does not return the Item slot. */
   itemRemove(accessToken: string): Promise<void>;
   /**
    * A full snapshot of every recurring stream on the Item. No cursor, no
@@ -464,9 +464,11 @@ export class PlaidClient implements LedgerPlaidApi {
   }
 
   /**
-   * Irreversible at Plaid. The access token stops working immediately and the
-   * Item's slot is freed; recovering the connection means a fresh trip through
-   * Link, which creates a new Item with a new id.
+   * Irreversible at Plaid. The access token stops working immediately. On the
+   * Trial plan `/item/remove` does not return the Item slot — only upgrading
+   * to a paid plan raises the cap. Recovering the connection means a fresh
+   * trip through Link, which creates a new Item with a new id and consumes
+   * another of the ten slots.
    */
   itemRemove(accessToken: string): Promise<void> {
     return this.#call('/item/remove', () =>

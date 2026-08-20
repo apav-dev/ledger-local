@@ -311,7 +311,7 @@ item
           `${removed.accounts} accounts, ${removed.transactions} transactions.\n` +
           (removed.alreadyGoneAtPlaid
             ? 'Plaid had already dropped this Item; only local rows were cleaned up.\n'
-            : 'The Item slot is free again.\n'),
+            : 'The access token is invalid. On the Trial plan this does not return the Item slot.\n'),
       );
     }),
   );
